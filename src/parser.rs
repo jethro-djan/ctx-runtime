@@ -9,7 +9,7 @@ use nom::{
     branch::alt,
     error,
 };
-use crate::ast::{Node, CommandStyle, Command};
+use crate::ast::{Node, CommandStyle, Command, ArgumentStyle};
 
 pub fn ctx_command(input: &str) -> IResult<&str, Node> {
     let (input, _) = tag("\\")(input)?;
@@ -21,6 +21,7 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
             return Ok((remaining, Node::Command(Command {
                 name: command_name.to_string(),
                 style: CommandStyle::ContextStyle,
+                arg_style: ArgumentStyle::Explicit,
                 options: opt.unwrap_or_default(),
                 arguments: vec![Node::Text(arg.to_string())],
             })));
@@ -40,13 +41,15 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
     Ok((input, Node::Command(Command {
         name: command_name.to_string(),
         style: CommandStyle::TexStyle,
+        arg_style: ArgumentStyle::Explicit,
         options: options.unwrap_or_default(),
         arguments: maybe_args.unwrap_or_default(),
     })))
 }
 
-// pub fn ctx_startstop(input: &str) -> IResult<&str, Node> {
-// }
+pub fn ctx_startstop(input: &str) -> IResult<&str, Node> {
+    todo!()
+}
 
 pub fn ctx_text(input: &str) -> IResult<&str, Node> {
     let (input, text) = take_till(|c| c == '\\' || c == '}')(input)?;

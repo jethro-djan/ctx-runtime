@@ -23,14 +23,22 @@ pub mod ast {
     pub struct Command {
         pub name: String,
         pub style: CommandStyle,
+        pub arg_style: ArgumentStyle,
         pub options: Vec<String>,
         pub arguments: Vec<Node>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum ArgumentStyle {
+        Explicit,
+        LineEnding,
+        GroupScoped,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{Node, Command, CommandStyle};
+    use super::ast::{Node, Command, CommandStyle, ArgumentStyle};
     use super::parser;
 
     #[test]
@@ -53,6 +61,7 @@ mod tests {
                 Node::Command(Command {
                     name: "externalfigure".to_string(),
                     style: CommandStyle::ContextStyle,
+                    arg_style: ArgumentStyle::Explicit,
                     options: vec!["scale=300".to_string()],
                     arguments: vec![Node::Text("cow.pdf".to_string())],
                 })
@@ -69,6 +78,7 @@ mod tests {
                 Node::Command(Command {
                     name: "framed".to_string(),
                     style: CommandStyle::TexStyle,
+                    arg_style: ArgumentStyle::Explicit,
                     options: vec!["width=textwidth".to_string()],
                     arguments: vec![Node::Text("Hi".to_string())],
                 })
@@ -85,6 +95,7 @@ mod tests {
                 Node::Command(Command {
                     name: "emph".to_string(),
                     style: CommandStyle::TexStyle,
+                    arg_style: ArgumentStyle::Explicit,
                     options: Vec::new(),
                     arguments: vec![Node::Text("Hey".to_string())],
                 })
@@ -102,29 +113,32 @@ mod tests {
             ))
         );
     }
-    // #[test]
-    // fn parse_startstop() {
-    //     assert_eq!(
-    //         parser::ctx_startstop(r"
-    //             \startitemize
-    //                 \item Hello
-    //             \stopitemize
-    //         "), 
-    //         Ok((
-    //             "", 
-    //             Node::StartStop({
-    //                 name: "itemize",
-    //                 options: [],
-    //                 content: Node::Command(
-    //                     Command {
-    //                         name: "item".to_string(),
-    //                         style: CommandStyle::TexStyle,
-    //                         options: [],
-    //                         arguments: vec![Node::Text("Hello".to_string())],
-    //                     }
-    //                 )
-    //             })
-    //         ))
-    //     );
-    // }
+    #[test]
+    fn parse_startstop() {
+        assert_eq!(
+            parser::ctx_startstop(r"
+                \startitemize
+                    \item Hello
+                \stopitemize
+            "), 
+            Ok((
+                "", 
+                Node::StartStop{
+                    name: "itemize".to_string(),
+                    options: Vec::new(),
+                    content: 
+                        vec![Node::Command(
+                            Command {
+                                name: "item".to_string(),
+                                style: CommandStyle::TexStyle,
+                                arg_style: ArgumentStyle::Explicit,
+                                options: Vec::new(),
+                                arguments: vec![Node::Text("Hello".to_string())],
+                            }
+                        )
+                    ]
+                }
+            ))
+        );
+    }
 }
