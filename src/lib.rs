@@ -4,7 +4,7 @@ pub mod ast {
     #[derive(Debug, PartialEq)]
     pub enum Node {
         Command(Command), 
-        Environment {
+        StartStop {
             name: String,
             options: Vec<String>,
             content: Vec<Node>,
@@ -102,4 +102,29 @@ mod tests {
             ))
         );
     }
+    // #[test]
+    // fn parse_startstop() {
+    //     assert_eq!(
+    //         parser::ctx_startstop(r"
+    //             \startitemize
+    //                 \item Hello
+    //             \stopitemize
+    //         "), 
+    //         Ok((
+    //             "", 
+    //             Node::StartStop({
+    //                 name: "itemize",
+    //                 options: [],
+    //                 content: Node::Command(
+    //                     Command {
+    //                         name: "item".to_string(),
+    //                         style: CommandStyle::TexStyle,
+    //                         options: [],
+    //                         arguments: vec![Node::Text("Hello".to_string())],
+    //                     }
+    //                 )
+    //             })
+    //         ))
+    //     );
+    // }
 }

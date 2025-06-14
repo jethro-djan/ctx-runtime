@@ -15,14 +15,18 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
     let (input, _) = tag("\\")(input)?;
     let (input, command_name) = alpha1(input)?;
 
+    println!("input: {:?}", input);
     if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
-        return Ok((remaining, Node::Command(Command {
-            name: command_name.to_string(),
-            style: CommandStyle::ContextStyle,
-            options: opt.unwrap_or_default(),
-            arguments: vec![Node::Text(arg.to_string())],
-        })));
+        if !remaining.starts_with('{') {
+            return Ok((remaining, Node::Command(Command {
+                name: command_name.to_string(),
+                style: CommandStyle::ContextStyle,
+                options: opt.unwrap_or_default(),
+                arguments: vec![Node::Text(arg.to_string())],
+            })));
+        }
     }
+    println!(": {:?}", input);
 
     let (input, maybe_options) = opt(parse_command_options).parse(input)?;
     let (input, maybe_args) = opt(parse_group).parse(input)?;
@@ -41,40 +45,7 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
     })))
 }
 
-// pub fn ctx_command(input: &str) -> IResult<&str, Node> {
-//     let (input, _) = tag("\\")(input)?;
-//     let (input, command_name) = alpha1(input)?;
-// 
-//     if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
-//         return Ok((remaining, Node::Command(Command {
-//             name: command_name.to_string(), 
-//             style: CommandStyle::ContextStyle,
-//             options: opt.unwrap_or_default(), 
-//             arguments: vec![Node::Text(arg)], 
-//         })));
-//     }
-// 
-//     let (input, opt) = opt(parse_command_options).parse(input)?;
-//     let (input, args) = match parse_group(input) {
-//         Ok((i, a)) => (i, a),
-//         Err(_) => (input, Vec::new()), 
-//     };
-// 
-//     Ok((input, Node::Command(Command {
-//         name: command_name.to_string(), 
-//         style: CommandStyle::TexStyle,
-//         options: opt.unwrap_or_default(), 
-//         arguments: args, 
-//     })))
-// }
-
-// pub fn ctx_text(input: &str) -> IResult<&str, Node> {
-//     let (input, text) = take_until("\\")(input)?;
-//     if text.is_empty() {
-//         Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeUntil)))
-//     } else {
-//         Ok((input, Node::Text(text.to_string())))
-//     }
+// pub fn ctx_startstop(input: &str) -> IResult<&str, Node> {
 // }
 
 pub fn ctx_text(input: &str) -> IResult<&str, Node> {
@@ -106,20 +77,6 @@ fn parse_context_style_args(input: &str) -> IResult<&str, (&str, Option<Vec<Stri
     )).parse(input)
 }
 
-// pub fn parse_context_style_args(input: &str) -> IResult<&str, (String, Option<Vec<String>>)> {
-//     let (input, arg) = delimited(tag("["), take_until("]"), tag("]")).parse(input)?;
-//     let (input, options) = opt(parse_command_options).parse(input)?;
-//     
-//     Ok((input, (arg.to_string(), options)))
-// }
-
-// pub fn parse_context_style_args(input: &str) -> IResult<&str, (String, Option<Vec<String>>)> {
-//     let (input, arg) = delimited(tag("["), take_until("]"), tag("]")).parse(input)?;
-//     let (input, options) = opt(parse_command_options).parse(input)?;
-//     
-//     Ok((input, (arg.to_string(), options)))
-// }
-
 pub fn parse_command_options(input: &str) -> IResult<&str, Vec<String>> {
     delimited(
         tag("["),
@@ -145,3 +102,5 @@ pub fn parse_group(input: &str) -> IResult<&str, Vec<Node>> {
         tag("}"),
     ).parse(input)
 }
+
+
