@@ -5,20 +5,21 @@ pub enum Node {
         name: String,
         options: Vec<String>,
         content: Vec<Node>,
-    }
+    },
     Text(String),
     Comment(String),
 }
 
+#[derive(Debug, PartialEq)]
 pub enum CommandStyle {
     TexStyle,
-    ContextSyle,
+    ContextStyle,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Command {
+pub struct Command {
     pub name: String,
     pub style: CommandStyle,
-    options: Vec<String>,
-    arguments: Vec<Node>,
+    pub options: Vec<String>,
+    pub arguments: Vec<Node>,
 }
