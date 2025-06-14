@@ -1,5 +1,5 @@
 use nom::{ 
-    bytes::complete::{tag, take_until}, 
+    bytes::complete::{tag, take_until, take_till}, 
     character::complete::{not_line_ending, alpha1},
     combinator::{opt, map_res, map},
     sequence::{preceded, delimited, separated_pair, tuple}, 
@@ -15,7 +15,6 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
     let (input, _) = tag("\\")(input)?;
     let (input, command_name) = alpha1(input)?;
 
-    // Case 4: ConTeXt-style command [arg][opt]
     if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
         return Ok((remaining, Node::Command(Command {
             name: command_name.to_string(),
@@ -25,11 +24,9 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
         })));
     }
 
-    // Cases 1-3: TeX-style commands
     let (input, maybe_options) = opt(parse_command_options).parse(input)?;
     let (input, maybe_args) = opt(parse_group).parse(input)?;
 
-    // If we found args but no options, try looking for options after args
     let (input, options) = if maybe_args.is_some() && maybe_options.is_none() {
         opt(parse_command_options).parse(input)?
     } else {
@@ -71,10 +68,19 @@ pub fn ctx_command(input: &str) -> IResult<&str, Node> {
 //     })))
 // }
 
+// pub fn ctx_text(input: &str) -> IResult<&str, Node> {
+//     let (input, text) = take_until("\\")(input)?;
+//     if text.is_empty() {
+//         Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeUntil)))
+//     } else {
+//         Ok((input, Node::Text(text.to_string())))
+//     }
+// }
+
 pub fn ctx_text(input: &str) -> IResult<&str, Node> {
-    let (input, text) = take_until("\\")(input)?;
+    let (input, text) = take_till(|c| c == '\\' || c == '}')(input)?;
     if text.is_empty() {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeUntil)))
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)))
     } else {
         Ok((input, Node::Text(text.to_string())))
     }

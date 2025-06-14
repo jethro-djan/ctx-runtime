@@ -1,5 +1,32 @@
-pub mod ast;
 pub mod parser;
+
+pub mod ast {
+    #[derive(Debug, PartialEq)]
+    pub enum Node {
+        Command(Command), 
+        Environment {
+            name: String,
+            options: Vec<String>,
+            content: Vec<Node>,
+        },
+        Text(String),
+        Comment(String),
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum CommandStyle {
+        TexStyle,
+        ContextStyle,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct Command {
+        pub name: String,
+        pub style: CommandStyle,
+        pub options: Vec<String>,
+        pub arguments: Vec<Node>,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -61,6 +88,17 @@ mod tests {
                     options: Vec::new(),
                     arguments: vec![Node::Text("Hey".to_string())],
                 })
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_text() {
+        assert_eq!(
+            parser::ctx_text(r"Let \im{x} be a variable."), 
+            Ok((
+                r"\im{x} be a variable.", 
+                Node::Text("Let ".to_string())
             ))
         );
     }
