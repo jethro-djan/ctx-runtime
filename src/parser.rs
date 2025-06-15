@@ -1,13 +1,12 @@
 use nom::{ 
     bytes::complete::{tag, take_until, take_till}, 
     character::complete::{not_line_ending, alpha1, multispace0},
-    combinator::{opt, map_res, map, rest},
-    sequence::{preceded, delimited, separated_pair, tuple, terminated}, 
-    multi::{many0, many1, separated_list1},
+    combinator::{opt, map, rest},
+    sequence::{preceded, delimited, terminated}, 
+    multi::{many0, separated_list1},
     IResult, 
     Parser,
     branch::alt,
-    error,
 };
 
 use crate::ast::{Node, CommandStyle, Command, ArgumentStyle};
@@ -102,10 +101,11 @@ pub fn ctx_code(input: &str) -> IResult<&str, Vec<Node>> {
 }
 
 fn parse_context_style_args(input: &str) -> IResult<&str, (&str, Option<Vec<String>>)> {
-    tuple((
+    (
         delimited(tag("["), take_until("]"), tag("]")),
         opt(parse_command_options),
-    )).parse(input)
+    )
+    .parse(input)
 }
 
 pub fn parse_command_options(input: &str) -> IResult<&str, Vec<String>> {
