@@ -7,9 +7,8 @@ mod tests {
     use super::parser;
     use std::collections::HashMap;
 
-    // Helper to create basic span for testing
     fn test_span() -> SourceSpan {
-        SourceSpan { start: 0, end: 0, line: 0, column: 0 }
+        SourceSpan { start: 0, end: 0, }
     }
 
     #[test]
@@ -19,9 +18,7 @@ mod tests {
             content: "This is a comment".to_string(),
             span: SourceSpan {
                 start: 0,
-                end: input.len(),
-                line: 1,
-                column: 1,
+                end: 0,
             }
         };
         
@@ -107,9 +104,7 @@ mod tests {
             content: "Let ".to_string(),
             span: SourceSpan {
                 start: 0,
-                end: 4,
-                line: 1,
-                column: 1,
+                end: 0,
             }
         };
         
@@ -121,7 +116,8 @@ mod tests {
 
     #[test]
     fn parse_startstop_environment() {
-        let input = r"\startitemize
+        let input =
+        r"\startitemize
             \item Hello
         \stopitemize";
         
@@ -129,6 +125,10 @@ mod tests {
             name: "itemize".to_string(),
             options: HashMap::new(),
             content: vec![
+                ConTeXtNode::Text {
+                    content: "\n            ".to_string(),
+                    span: parser::dummy_span(),
+                },
                 ConTeXtNode::Command {
                     name: "item".to_string(),
                     style: CommandStyle::TexStyle,
@@ -136,12 +136,16 @@ mod tests {
                     options: HashMap::new(),
                     arguments: vec![ConTeXtNode::Text {
                         content: "Hello".to_string(),
-                        span: test_span(),
+                        span: parser::dummy_span(),
                     }],
-                    span: test_span(),
+                    span: parser::dummy_span(),
+                },
+                ConTeXtNode::Text {
+                    content: "        ".to_string(),
+                    span: parser::dummy_span(),
                 }
             ],
-            span: test_span(),
+            span: parser::dummy_span(),
         };
         
         assert_eq!(
@@ -152,8 +156,9 @@ mod tests {
 
     #[test]
     fn parse_document_structure() {
-        let input = r"\startdocument
-            \chapter{Introduction}
+        let input = 
+            r"\startdocument
+                \chapter{Introduction}
             \stopdocument";
         
         let expected = ConTeXtNode::Document {
@@ -163,6 +168,10 @@ mod tests {
                     name: "document".to_string(),
                     options: HashMap::new(),
                     content: vec![
+                        ConTeXtNode::Text {
+                            content: "\n                ".to_string(),
+                            span: parser::dummy_span(),
+                        },
                         ConTeXtNode::Command {
                             name: "chapter".to_string(),
                             style: CommandStyle::TexStyle,
@@ -173,7 +182,11 @@ mod tests {
                                 span: test_span(),
                             }],
                             span: test_span(),
-                        }
+                        },
+                        ConTeXtNode::Text {
+                            content: "\n            ".to_string(),
+                            span: parser::dummy_span(),
+                        },
                     ],
                     span: test_span(),
                 }

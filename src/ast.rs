@@ -56,6 +56,4 @@ pub enum ArgumentStyle {
 pub struct SourceSpan {
     pub start: usize,
     pub end: usize,
-    pub line: usize,
-    pub column: usize,
 }

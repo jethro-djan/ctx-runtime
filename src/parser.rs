@@ -14,7 +14,7 @@ use crate::ast::{ConTeXtNode, SourceSpan, ArgumentStyle, CommandStyle};
 pub fn parse_document(input: &str) -> IResult<&str, ConTeXtNode> {
     let (input, nodes) = many0(parse_node).parse(input)?;
     Ok((input, ConTeXtNode::Document {
-        preamble: Vec::new(), // Will handle later
+        preamble: Vec::new(), 
         body: nodes,
     }))
 }
@@ -32,9 +32,29 @@ pub fn parse_command(input: &str) -> IResult<&str, ConTeXtNode> {
     let (input, _) = char('\\')(input)?;
     let (input, name) = alpha1(input)?;
     
+    if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
+        if !remaining.starts_with('{') {
+            let mut options = HashMap::new();
+            if let Some(opt) = opt {
+                options.extend(opt);
+            }
+            return Ok((remaining, ConTeXtNode::Command {
+                name: name.to_string(),
+                style: CommandStyle::ContextStyle,
+                arg_style: ArgumentStyle::Explicit,
+                options,
+                arguments: vec![ConTeXtNode::Text {
+                    content: arg.to_string(),
+                    span: dummy_span(),
+                }],
+                span: dummy_span(),
+            }));
+        }
+    }
+
     let (style, arg_style) = match name {
         "item" => (CommandStyle::TexStyle, ArgumentStyle::LineEnding),
-        "em" | "bf" => (CommandStyle::TexStyle, ArgumentStyle::GroupScoped),
+        "em" | "bf" | "it" | "tt" | "rm" | "sf" | "sc" | "sl" => (CommandStyle::TexStyle, ArgumentStyle::GroupScoped),
         _ => (CommandStyle::TexStyle, ArgumentStyle::Explicit),
     };
 
@@ -51,7 +71,7 @@ pub fn parse_command(input: &str) -> IResult<&str, ConTeXtNode> {
         arg_style,
         options: options.unwrap_or_default(),
         arguments,
-        span: dummy_span(), // Implement proper span tracking
+        span: dummy_span(),
     }))
 }
 
@@ -70,7 +90,7 @@ pub fn parse_startstop(input: &str) -> IResult<&str, ConTeXtNode> {
         name: name.to_string(),
         options: options.unwrap_or_default(),
         content,
-        span: dummy_span(), // Implement proper span tracking
+        span: dummy_span(), 
     }))
 }
 
@@ -98,16 +118,32 @@ pub fn parse_text(input: &str) -> IResult<&str, ConTeXtNode> {
     }))
 }
 
-// Argument parsers
-pub fn parse_explicit_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+fn parse_context_style_args(input: &str) -> IResult<&str, (&str, Option<HashMap<String, String>>)> {
+    let (input, arg) = delimited(
+        char('['),
+        take_until("]"),
+        char(']')
+    ).parse(input)?;
+    
+    let (input, options) = opt(parse_options).parse(input)?;
+    
+    Ok((input, (arg, options)))
+}
+
+fn parse_explicit_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
     opt(delimited(
         char('{'),
-        many0(parse_node),
+        many0(alt((
+            parse_text,
+            parse_comment,
+            parse_command,
+            parse_startstop,
+        ))),
         char('}'),
     )).parse(input).map(|(i, v)| (i, v.unwrap_or_default()))
 }
 
-pub fn parse_line_ending_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+fn parse_line_ending_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
     let (input, text) = terminated(
         take_until("\n"),
         char('\n')
@@ -119,8 +155,18 @@ pub fn parse_line_ending_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
     }]))
 }
 
-pub fn parse_group_scoped_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
-    many0(parse_node).parse(input)
+fn parse_group_scoped_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    delimited(
+        char('{'),
+        |content| {
+            many0(alt((
+                parse_text,
+                parse_comment,
+                parse_command,
+            ))).parse(content)
+        },
+        char('}')
+    ).parse(input)
 }
 
 pub fn parse_options(input: &str) -> IResult<&str, HashMap<String, String>> {
@@ -143,5 +189,5 @@ pub fn parse_options(input: &str) -> IResult<&str, HashMap<String, String>> {
 }
 
 pub fn dummy_span() -> SourceSpan {
-    SourceSpan { start: 0, end: 0, line: 0, column: 0 }
+    SourceSpan { start: 0, end: 0, }
 }
