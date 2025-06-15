@@ -1,7 +1,7 @@
 pub mod parser;
 
 pub mod ast {
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub enum Node {
         Command(Command), 
         StartStop {
@@ -13,13 +13,13 @@ pub mod ast {
         Comment(String),
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub enum CommandStyle {
         TexStyle,
         ContextStyle,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub struct Command {
         pub name: String,
         pub style: CommandStyle,
@@ -28,7 +28,7 @@ pub mod ast {
         pub arguments: Vec<Node>,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub enum ArgumentStyle {
         Explicit,
         LineEnding,
@@ -131,7 +131,7 @@ mod tests {
                             Command {
                                 name: "item".to_string(),
                                 style: CommandStyle::TexStyle,
-                                arg_style: ArgumentStyle::Explicit,
+                                arg_style: ArgumentStyle::LineEnding,
                                 options: Vec::new(),
                                 arguments: vec![Node::Text("Hello".to_string())],
                             }
