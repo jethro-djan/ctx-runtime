@@ -1,13 +1,33 @@
+use std::collections::HashMap;
+
 #[derive(Debug, PartialEq, Clone)]
-pub enum Node {
-    Command(Command), 
+pub enum ConTeXtNode {
+    Document {
+        preamble: Vec<ConTeXtNode>,
+        body: Vec<ConTeXtNode>,
+    },
+    Command {
+        name: String,
+        style: CommandStyle,
+        arg_style: ArgumentStyle,
+        options: HashMap<String, String>,
+        arguments: Vec<ConTeXtNode>,
+        span: SourceSpan,
+    }, 
     StartStop {
         name: String,
-        options: Vec<String>,
-        content: Vec<Node>,
+        options: HashMap<String, String>,
+        content: Vec<ConTeXtNode>,
+        span: SourceSpan,
     },
-    Text(String),
-    Comment(String),
+    Text {
+        content: String,
+        span: SourceSpan,
+    },
+    Comment {
+        content: String,
+        span: SourceSpan
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -22,7 +42,7 @@ pub struct Command {
     pub style: CommandStyle,
     pub arg_style: ArgumentStyle,
     pub options: Vec<String>,
-    pub arguments: Vec<Node>,
+    pub arguments: Vec<ConTeXtNode>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -30,4 +50,12 @@ pub enum ArgumentStyle {
     Explicit,
     LineEnding,
     GroupScoped,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
 }

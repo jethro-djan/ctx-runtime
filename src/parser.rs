@@ -1,216 +1,147 @@
-use nom::{ 
-    bytes::complete::{tag, take_until, take_till}, 
-    character::complete::{not_line_ending, alpha1, multispace0},
-    combinator::{opt, map, rest},
-    sequence::{preceded, delimited, terminated}, 
-    multi::{many0, separated_list1},
-    IResult, 
-    Parser,
+use nom::{
     branch::alt,
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{alpha1, char, not_line_ending, multispace0},
+    combinator::{map, opt, recognize, verify},
+    multi::{many0, many_till},
+    sequence::{delimited, preceded, terminated},
+    IResult, Parser,
 };
+use std::collections::HashMap;
 
-use crate::ast::{Node, CommandStyle, Command, ArgumentStyle};
+use crate::ast::{ConTeXtNode, SourceSpan, ArgumentStyle, CommandStyle};
 
-pub fn ctx_command(input: &str) -> IResult<&str, Node> {
-    let (input, _) = tag("\\")(input)?;
-    let (input, command_name) = alpha1(input)?;
-
-    if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
-        if !remaining.starts_with('{') {
-            return Ok((remaining, Node::Command(Command {
-                name: command_name.to_string(),
-                style: CommandStyle::ContextStyle,
-                arg_style: ArgumentStyle::Explicit,
-                options: opt.unwrap_or_default(),
-                arguments: vec![Node::Text(arg.to_string())],
-            })));
-        }
-    }
-
-    if is_line_ending_command(&command_name) {
-        return parse_line_ending_command(input, command_name.to_string());
-    }
-
-    if is_group_scoped_command(&command_name) {
-        return parse_group_scoped_command(input, command_name.to_string());
-    }
-
-    let (input, maybe_options) = opt(parse_command_options).parse(input)?;
-    let (input, maybe_args) = opt(parse_group).parse(input)?;
-
-    let (input, options) = if maybe_args.is_some() && maybe_options.is_none() {
-        opt(parse_command_options).parse(input)?
-    } else {
-        (input, maybe_options)
-    };
-
-    Ok((input, Node::Command(Command {
-        name: command_name.to_string(),
-        style: CommandStyle::TexStyle,
-        arg_style: ArgumentStyle::Explicit,
-        options: options.unwrap_or_default(),
-        arguments: maybe_args.unwrap_or_default(),
-    })))
-}
-
-pub fn ctx_startstop(input: &str) -> IResult<&str, Node> {
-    let (input, _) = multispace0(input)?;
-    let (input, _) = tag("\\start")(input)?;
-    let (input, env_name) = alpha1(input)?;
-    
-    let (input, options) = opt(parse_command_options).parse(input)?;
-    
-    let (input, _) = multispace0(input)?;
-    
-    let stop_tag = format!("\\stop{}", env_name);
-    let (input, content_str) = take_until(stop_tag.as_str()).parse(input)?;
-    
-    let (input, _) = tag(&*stop_tag)(input)?;
-
-    let (input, _) = multispace0(input)?;
-    
-    let (_, content) = ctx_code(content_str.trim())?;
-    
-    Ok((input, Node::StartStop {
-        name: env_name.to_string(),
-        options: options.unwrap_or_default(),
-        content,
+pub fn parse_document(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, nodes) = many0(parse_node).parse(input)?;
+    Ok((input, ConTeXtNode::Document {
+        preamble: Vec::new(), // Will handle later
+        body: nodes,
     }))
 }
 
-pub fn ctx_text(input: &str) -> IResult<&str, Node> {
-    let (input, text) = take_till(|c| c == '\\' || c == '}')(input)?;
-    if text.is_empty() {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)))
-    } else {
-        Ok((input, Node::Text(text.to_string())))
-    }
+pub fn parse_node(input: &str) -> IResult<&str, ConTeXtNode> {
+    alt((
+        parse_comment,
+        parse_startstop,
+        parse_command,
+        parse_text,
+    )).parse(input)
 }
 
-pub fn ctx_comment(input: &str) -> IResult<&str, Node> {
-    let (input, comment) = preceded(tag("%"), not_line_ending).parse(input)?;
-    Ok((input, Node::Comment(comment.trim().to_string())))
-}
-
-pub fn ctx_code(input: &str) -> IResult<&str, Vec<Node>> {
-    many0(alt((
-        ctx_command,
-        ctx_comment,
-        ctx_text,
-    ))).parse(input)
-}
-
-fn parse_context_style_args(input: &str) -> IResult<&str, (&str, Option<Vec<String>>)> {
-    (
-        delimited(tag("["), take_until("]"), tag("]")),
-        opt(parse_command_options),
-    )
-    .parse(input)
-}
-
-pub fn parse_command_options(input: &str) -> IResult<&str, Vec<String>> {
-    delimited(
-        tag("["),
-        separated_list1(
-            tag("]["),
-            map(
-                take_until("]"),
-                |s: &str| s.to_string()
-            )
-        ),
-        tag("]"),
-    ).parse(input)
-}
-
-fn is_line_ending_command(name: &str) -> bool {
-    matches!(name, "item")
-}
-
-fn is_group_scoped_command(name: &str) -> bool {
-    matches!(name, "it" | "bf" | "tt" | "em" | "rm" | "sf" | "sc" | "sl")
-}
-
-fn parse_line_ending_command(input: &str, command_name: String) -> IResult<&str, Node> {
-    let (input, _) = multispace0(input)?;
+pub fn parse_command(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, _) = char('\\')(input)?;
+    let (input, name) = alpha1(input)?;
     
-    let (input, text) = alt((
-        terminated(take_until("\n"), tag("\n")),
-        rest 
-    )).parse(input)?;
-    
-    let arguments = if text.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![Node::Text(text.trim().to_string())]
+    let (style, arg_style) = match name {
+        "item" => (CommandStyle::TexStyle, ArgumentStyle::LineEnding),
+        "em" | "bf" => (CommandStyle::TexStyle, ArgumentStyle::GroupScoped),
+        _ => (CommandStyle::TexStyle, ArgumentStyle::Explicit),
     };
 
-    Ok((input, Node::Command(Command {
-        name: command_name,
-        style: CommandStyle::TexStyle,
-        arg_style: ArgumentStyle::LineEnding,
-        options: Vec::new(),
+    let (input, options) = opt(parse_options).parse(input)?;
+    let (input, arguments) = match arg_style {
+        ArgumentStyle::LineEnding => parse_line_ending_args(input)?,
+        ArgumentStyle::GroupScoped => parse_group_scoped_args(input)?,
+        ArgumentStyle::Explicit => parse_explicit_args(input)?,
+    };
+
+    Ok((input, ConTeXtNode::Command {
+        name: name.to_string(),
+        style,
+        arg_style,
+        options: options.unwrap_or_default(),
         arguments,
-    })))
+        span: dummy_span(), // Implement proper span tracking
+    }))
 }
 
-pub fn parse_group(input: &str) -> IResult<&str, Vec<Node>> {
+pub fn parse_startstop(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, _) = tag("\\start")(input)?;
+    let (input, name) = alpha1(input)?;
+    let (input, options) = opt(parse_options).parse(input)?;
+    
+    let stop_tag = format!("\\stop{}", name);
+    let (input, (content, _)) = many_till(
+        parse_node,
+        tag(&*stop_tag)
+    ).parse(input)?;
+
+    Ok((input, ConTeXtNode::StartStop {
+        name: name.to_string(),
+        options: options.unwrap_or_default(),
+        content,
+        span: dummy_span(), // Implement proper span tracking
+    }))
+}
+
+pub fn parse_comment(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, comment) = preceded(
+        char('%'),
+        not_line_ending
+    ).parse(input)?;
+    
+    Ok((input, ConTeXtNode::Comment {
+        content: comment.trim().to_string(),
+        span: dummy_span(),
+    }))
+}
+
+pub fn parse_text(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, text) = verify(
+        take_while1(|c| c != '\\' && c != '%' && c != '{' && c != '}'),
+        |s: &str| !s.is_empty()
+    ).parse(input)?;
+    
+    Ok((input, ConTeXtNode::Text {
+        content: text.to_string(),
+        span: dummy_span(),
+    }))
+}
+
+// Argument parsers
+pub fn parse_explicit_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    opt(delimited(
+        char('{'),
+        many0(parse_node),
+        char('}'),
+    )).parse(input).map(|(i, v)| (i, v.unwrap_or_default()))
+}
+
+pub fn parse_line_ending_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    let (input, text) = terminated(
+        take_until("\n"),
+        char('\n')
+    ).parse(input)?;
+    
+    Ok((input, vec![ConTeXtNode::Text {
+        content: text.trim().to_string(),
+        span: dummy_span(),
+    }]))
+}
+
+pub fn parse_group_scoped_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    many0(parse_node).parse(input)
+}
+
+pub fn parse_options(input: &str) -> IResult<&str, HashMap<String, String>> {
     delimited(
-        tag("{"),
-        parse_group_content,
-        tag("}"),
+        char('['),
+        map(
+            take_until("]"),
+            |s: &str| {
+                s.split(',')
+                 .filter_map(|pair| {
+                     let mut kv = pair.splitn(2, '=');
+                     Some((kv.next()?.trim().to_string(), 
+                          kv.next().unwrap_or("true").trim().to_string()))
+                 })
+            }
+                 .collect()
+            ),
+        char(']'),
     ).parse(input)
 }
 
-fn parse_group_content(input: &str) -> IResult<&str, Vec<Node>> {
-    let mut nodes = Vec::new();
-    let mut remaining = input;
-    
-    while !remaining.is_empty() && !remaining.starts_with('}') {
-        if let Ok((new_remaining, node)) = ctx_command(remaining) {
-            if let Node::Command(ref cmd) = node {
-                if cmd.arg_style == ArgumentStyle::GroupScoped {
-                    let (final_remaining, scoped_content) = parse_group_content(new_remaining)?;
-                    
-                    let scoped_command = Node::Command(Command {
-                        name: cmd.name.clone(),
-                        style: cmd.style.clone(),
-                        arg_style: cmd.arg_style.clone(),
-                        options: cmd.options.clone(),
-                        arguments: scoped_content,
-                    });
-                    
-                    nodes.push(scoped_command);
-                    remaining = final_remaining;
-                    break; 
-                }
-            }
-            nodes.push(node);
-            remaining = new_remaining;
-        }
-        else if let Ok((new_remaining, node)) = ctx_comment(remaining) {
-            nodes.push(node);
-            remaining = new_remaining;
-        }
-        else if let Ok((new_remaining, node)) = ctx_text(remaining) {
-            nodes.push(node);
-            remaining = new_remaining;
-        }
-        else {
-            return Err(nom::Err::Error(nom::error::Error::new(remaining, nom::error::ErrorKind::Alt)));
-        }
-    }
-    
-    Ok((remaining, nodes))
+pub fn dummy_span() -> SourceSpan {
+    SourceSpan { start: 0, end: 0, line: 0, column: 0 }
 }
-
-fn parse_group_scoped_command(input: &str, command_name: String) -> IResult<&str, Node> {
-    Ok((input, Node::Command(Command {
-        name: command_name,
-        style: CommandStyle::TexStyle,
-        arg_style: ArgumentStyle::GroupScoped,
-        options: Vec::new(),
-        arguments: Vec::new(), 
-    })))
-}
-
-
