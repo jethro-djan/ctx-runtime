@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "lib"]
 name = "context_runtime"
 
 [[bin]]
@@ -28,3 +28,6 @@ cdylib_name = "context_runtime"
 
 [features]
 ffi-trace = ["uniffi/ffi-trace"]
+
+[[example]]
+name = "debug"

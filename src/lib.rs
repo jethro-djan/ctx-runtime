@@ -40,7 +40,7 @@ pub struct HighlightFFI {
     pub kind: String,
 }
 
-uniffi::include_scaffolding!("context");
+// uniffi::include_scaffolding!("context");
 
 #[cfg(test)]
 mod tests {

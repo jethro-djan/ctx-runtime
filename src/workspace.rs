@@ -9,7 +9,6 @@ pub struct Document {
 }
 
 impl Document {
-    #[uniffi::constructor]
     pub fn from_str(source: &str) -> Option<Self> {
         let ast = parser::parse_document(source).ok()?;
         let green = syntax::ast_to_rowan(ast.clone());
