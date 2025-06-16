@@ -1,1 +1,5 @@
+# MacOS related
+.DS_Store
+
+# Rust related
 /target
