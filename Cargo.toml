@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 nom = { version = "8.0.0", features = ["alloc"] }
+nom_locate = "5.0.0"
 pretty_assertions = "1.4.1"
 rowan = "0.16.1"
 smol_str = "0.3.2"
