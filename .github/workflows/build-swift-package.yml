@@ -33,7 +33,7 @@ jobs:
           rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
 
       - name: Add UniFFI
-        run: cargo add uniffi --version "0.29.3" 
+        run: cargo add uniffi  
 
       - name: Generate UniFFI bindings
         run: |
