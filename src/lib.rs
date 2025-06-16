@@ -1,26 +1,46 @@
-pub mod ast;
 pub mod parser;
 pub mod syntax;
 pub mod highlight;
+pub mod workspace;
+pub mod ast;
 
 use highlight::Highlight;
 
-pub struct ConTeXtEngine {
-    syntax_tree: Option<syntax::SyntaxNode>,
+
+pub struct Runtime {
+    workspace: workspace::Workspace,
 }
 
-impl ConTeXtEngine {
-    pub fn update(&mut self, text: &str) {
-        let document_node = parser::parse_document(text).unwrap();
-        self.syntax_tree = Some(syntax::SyntaxNode::new_root(syntax::ast_to_rowan(document_node)));
+
+impl Runtime {
+    pub fn new() -> Self {
+        Runtime {
+            workspace: workspace::Workspace::new(),
+        }
     }
 
-    pub fn highlights(&self) -> Vec<Highlight> {
-        self.syntax_tree.as_ref()
-            .map(|tree| highlight::run(tree))
+    pub fn open(&mut self, uri: String, source: String) -> bool {
+        self.workspace.open(&uri, &source)
+    }
+
+    pub fn get_highlights(&self, uri: String) -> Vec<HighlightFFI> {
+        self.workspace.highlights(&uri)
             .unwrap_or_default()
+            .iter()
+            .map(|h| HighlightFFI {
+                range: vec![h.range.start as u32, h.range.end as u32],
+                kind: format!("{:?}", h.kind),
+            })
+            .collect()
     }
 }
+
+pub struct HighlightFFI {
+    pub range: Vec<u32>,
+    pub kind: String,
+}
+
+uniffi::include_scaffolding!("context");
 
 #[cfg(test)]
 mod tests {

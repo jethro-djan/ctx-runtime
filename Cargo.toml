@@ -3,9 +3,28 @@ name = "context-runtime"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "context_runtime"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
 [dependencies]
 nom = { version = "8.0.0", features = ["alloc"] }
 nom_locate = "5.0.0"
 pretty_assertions = "1.4.1"
 rowan = "0.16.1"
 smol_str = "0.3.2"
+tokio = "1.45.1"
+uniffi = { version = "0.29.3", features = ["cli"] }
+
+[build-dependencies]
+uniffi = { version = "0.29.3", features = ["build"] }
+
+[package.metadata.uniffi]
+cdylib_name = "context_runtime"
+
+[features]
+ffi-trace = ["uniffi/ffi-trace"]
