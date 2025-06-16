@@ -11,6 +11,11 @@ name = "context_runtime"
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+
+
 [dependencies]
 nom = { version = "8.0.0", features = ["alloc"] }
 nom_locate = "5.0.0"

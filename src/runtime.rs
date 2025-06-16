@@ -1,5 +1,3 @@
-// uniffi::include_scaffolding!("context");
-
 use crate::workspace::Workspace;
 pub struct Runtime {
     workspace: Workspace,
@@ -28,7 +26,6 @@ impl Runtime {
     }
 }
 
-// #[derive(uniffi::Record)]
 pub struct HighlightFFI {
     pub range: Vec<u32>,
     pub kind: String,

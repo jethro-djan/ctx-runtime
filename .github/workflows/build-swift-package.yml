@@ -1,0 +1,89 @@
+name: Release iOS XCFramework
+
+on:
+  push:
+    tags: 
+      - 'v*'  # Trigger on version tags (e.g., v1.0.0)
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
+
+      - name: Add UniFFI
+        run: cargo add uniffi --version "0.29.3" 
+
+      - name: Generate UniFFI bindings
+        run: |
+          cargo run --bin uniffi-bindgen generate --library target/release/libcontext_runtime.a --language swift --out-dir out
+          cargo run --bin uniffi-bindgen-swift -- target/release/libcontext_runtime.a build/swift/Modules --xcframework --modulemap --modulemap-filename context.modulemap
+
+      - name: Build Rust libraries
+        run: |
+          cargo build --release --target aarch64-apple-ios
+          cargo build --release --target x86_64-apple-ios
+          cargo build --release --target aarch64-apple-ios-sim
+          lipo -create \
+              target/x86_64-apple-ios/release/libcontext_runtime.a \
+              target/aarch64-apple-ios-sim/release/libcontext_runtime.a \
+              -output target/universal-ios-sim/release/libcontext_runtime.a
+
+      - name: Create XCFramework
+        run: |
+          mkdir -p xcframework/Headers
+          cp out/*.h xcframework/Headers/
+          cp out/*.modulemap xcframework/Headers/
+          xcodebuild -create-xcframework \
+              -library target/aarch64-apple-ios/release/libcontext_runtime.a \
+              -headers xcframework/Headers \
+              -library target/universal-ios-sim/release/libcontext_runtime.a \
+              -headers xcframework/Headers \
+              -output ContextRuntime.xcframework
+          mkdir -p ContextRuntime.xcframework/swift-interfaces
+          cp out/*.swift ContextRuntime.xcframework/swift-interfaces/
+
+      - name: Zip XCFramework
+        run: zip -r ContextRuntime.xcframework.zip ContextRuntime.xcframework
+
+      - name: Create Swift Package
+        run: |
+          mkdir -p ContextRuntimeSPM/Sources/ContextRuntime
+          cp -R out/*.swift ContextRuntimeSPM/Sources/ContextRuntime/
+          cat > ContextRuntimeSPM/Package.swift <<EOF
+          // swift-tools-version:5.9
+          import PackageDescription
+          
+          let package = Package(
+              name: "ContextRuntime",
+              platforms: [.iOS(.v16)],
+              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
+              targets: [
+                  .binaryTarget(
+                      name: "ContextRuntimeFFI",
+                      url: "https://github.com/your/repo/releases/download/\${GITHUB_REF_NAME}/ContextRuntime.xcframework.zip",
+                      checksum: "$(shasum -a 256 ContextRuntime.xcframework.zip | cut -d ' ' -f 1)"
+                  ),
+                  .target(
+                      name: "ContextRuntime",
+                      dependencies: ["ContextRuntimeFFI"],
+                      path: "Sources/ContextRuntime",
+                      swiftSettings: [
+                          .enableExperimentalFeature("ForeignReferenceType")
+                      ]
+                  )
+              ]
+          )
+          EOF
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ContextRuntime.xcframework.zip
+            ContextRuntimeSPM/Package.swift
