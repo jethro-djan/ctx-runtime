@@ -1,0 +1,259 @@
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{alpha1, char, not_line_ending, multispace0},
+    combinator::{map, opt, recognize, verify},
+    multi::{many0, many_till},
+    sequence::{delimited, preceded, terminated},
+    IResult, Parser,
+};
+use std::collections::HashMap;
+
+use crate::ast::{ConTeXtNode, SourceSpan, ArgumentStyle, CommandStyle};
+
+pub fn parse_document(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, preamble) = parse_until_any(input, &["\\starttext", "\\startdocument"])?;
+    
+    let (input, starter) = alt((
+        tag("\\starttext"),
+        tag("\\startdocument")
+    )).parse(input)?;
+    
+    let stop_marker = if starter == "\\starttext" {
+        "\\stoptext"
+    } else {
+        "\\stopdocument"
+    };
+    let (input, body) = parse_until(input, stop_marker)?;
+    
+    let (_, preamble_nodes) = many0(parse_node).parse(preamble)?;
+    let (_, body_nodes) = many0(parse_node).parse(body)?;
+    
+    Ok((input, ConTeXtNode::Document {
+        preamble: preamble_nodes,
+        body: body_nodes,
+    }))
+}
+
+fn parse_until<'a>(input: &'a str, end_marker: &'a str) -> IResult<&'a str, &'a str> {
+    let mut depth = 0;
+    let mut pos = 0;
+    let bytes = input.as_bytes();
+    let end_bytes = end_marker.as_bytes();
+    let end_len = end_bytes.len();
+    
+    while pos <= bytes.len().saturating_sub(end_len) {
+        if pos + 9 <= bytes.len() && &bytes[pos..pos+6] == b"\\start" {
+            depth += 1;
+            pos += 6;
+        } 
+        else if depth > 0 && pos + 7 <= bytes.len() && &bytes[pos..pos+5] == b"\\stop" {
+            depth -= 1;
+            pos += 5;
+        }
+        else if depth == 0 && &bytes[pos..pos+end_len] == end_bytes {
+            return Ok((&input[pos+end_len..], &input[..pos]));
+        }
+        else {
+            pos += 1;
+        }
+    }
+    
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Tag
+    )))
+}
+
+fn parse_until_any<'a>(input: &'a str, patterns: &[&str]) -> IResult<&'a str, &'a str> {
+    let mut earliest_match = input.len();
+    
+    for pattern in patterns {
+        if let Ok((_, remaining)) = tag::<_, _, ()>(pattern)(input) {
+            let pos = input.len() - remaining.len();
+            earliest_match = earliest_match.min(pos);
+        }
+    }
+    
+    if earliest_match == input.len() {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag
+        )))
+    } else {
+        Ok((&input[earliest_match..], &input[..earliest_match]))
+    }
+}
+
+pub fn parse_node(input: &str) -> IResult<&str, ConTeXtNode> {
+    alt((
+        parse_comment,
+        parse_startstop,
+        parse_command,
+        parse_text,
+    )).parse(input)
+}
+
+pub fn parse_command(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, _) = char('\\')(input)?;
+    let (input, name) = alpha1(input)?;
+    
+    if let Ok((remaining, (arg, opt))) = parse_context_style_args(input) {
+        if !remaining.starts_with('{') {
+            let mut options = HashMap::new();
+            if let Some(opt) = opt {
+                options.extend(opt);
+            }
+            return Ok((remaining, ConTeXtNode::Command {
+                name: name.to_string(),
+                style: CommandStyle::ContextStyle,
+                arg_style: ArgumentStyle::Explicit,
+                options,
+                arguments: vec![ConTeXtNode::Text {
+                    content: arg.to_string(),
+                    span: dummy_span(),
+                }],
+                span: dummy_span(),
+            }));
+        }
+    }
+
+    let (style, arg_style) = match name {
+        "item" => (CommandStyle::TexStyle, ArgumentStyle::LineEnding),
+        "em" | "bf" | "it" | "tt" | "rm" | "sf" | "sc" | "sl" => (CommandStyle::TexStyle, ArgumentStyle::GroupScoped),
+        _ => (CommandStyle::TexStyle, ArgumentStyle::Explicit),
+    };
+
+    let (input, options) = opt(parse_options).parse(input)?;
+    let (input, arguments) = match arg_style {
+        ArgumentStyle::LineEnding => parse_line_ending_args(input)?,
+        ArgumentStyle::GroupScoped => parse_group_scoped_args(input)?,
+        ArgumentStyle::Explicit => parse_explicit_args(input)?,
+    };
+
+    Ok((input, ConTeXtNode::Command {
+        name: name.to_string(),
+        style,
+        arg_style,
+        options: options.unwrap_or_default(),
+        arguments,
+        span: dummy_span(),
+    }))
+}
+
+pub fn parse_startstop(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, _) = tag("\\start")(input)?;
+    let (input, name) = alpha1(input)?;
+    let (input, options) = opt(parse_options).parse(input)?;
+    
+    let stop_tag = format!("\\stop{}", name);
+    let (input, (content, _)) = many_till(
+        parse_node,
+        tag(&*stop_tag)
+    ).parse(input)?;
+
+    Ok((input, ConTeXtNode::StartStop {
+        name: name.to_string(),
+        options: options.unwrap_or_default(),
+        content,
+        span: dummy_span(), 
+    }))
+}
+
+pub fn parse_comment(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, comment) = preceded(
+        char('%'),
+        not_line_ending
+    ).parse(input)?;
+    
+    Ok((input, ConTeXtNode::Comment {
+        content: comment.trim().to_string(),
+        span: dummy_span(),
+    }))
+}
+
+pub fn parse_text(input: &str) -> IResult<&str, ConTeXtNode> {
+    let (input, text) = verify(
+        take_while1(|c| c != '\\' && c != '%' && c != '{' && c != '}'),
+        |s: &str| !s.is_empty()
+    ).parse(input)?;
+    
+    Ok((input, ConTeXtNode::Text {
+        content: text.to_string(),
+        span: dummy_span(),
+    }))
+}
+
+fn parse_context_style_args(input: &str) -> IResult<&str, (&str, Option<HashMap<String, String>>)> {
+    let (input, arg) = delimited(
+        char('['),
+        take_until("]"),
+        char(']')
+    ).parse(input)?;
+    
+    let (input, options) = opt(parse_options).parse(input)?;
+    
+    Ok((input, (arg, options)))
+}
+
+fn parse_explicit_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    opt(delimited(
+        char('{'),
+        many0(alt((
+            parse_text,
+            parse_comment,
+            parse_command,
+            parse_startstop,
+        ))),
+        char('}'),
+    )).parse(input).map(|(i, v)| (i, v.unwrap_or_default()))
+}
+
+fn parse_line_ending_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    let (input, text) = terminated(
+        take_until("\n"),
+        char('\n')
+    ).parse(input)?;
+    
+    Ok((input, vec![ConTeXtNode::Text {
+        content: text.trim().to_string(),
+        span: dummy_span(),
+    }]))
+}
+
+fn parse_group_scoped_args(input: &str) -> IResult<&str, Vec<ConTeXtNode>> {
+    delimited(
+        char('{'),
+        |content| {
+            many0(alt((
+                parse_text,
+                parse_comment,
+                parse_command,
+            ))).parse(content)
+        },
+        char('}')
+    ).parse(input)
+}
+
+pub fn parse_options(input: &str) -> IResult<&str, HashMap<String, String>> {
+    delimited(
+        char('['),
+        map(
+            take_until("]"),
+            |s: &str| {
+                s.split(',')
+                 .filter_map(|pair| {
+                     let mut kv = pair.splitn(2, '=');
+                     Some((kv.next()?.trim().to_string(), 
+                          kv.next().unwrap_or("true").trim().to_string()))
+                 })
+            }
+                 .collect()
+            ),
+        char(']'),
+    ).parse(input)
+}
+
+pub fn dummy_span() -> SourceSpan {
+    SourceSpan { start: 0, end: 0, }
+}
