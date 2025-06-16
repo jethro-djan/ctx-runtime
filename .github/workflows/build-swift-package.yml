@@ -9,8 +9,24 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      # Step 1: Checkout code
+      - uses: actions/checkout@v4
+
+      # Step 2: Validate version format (ADD THIS STEP EARLY!)
+      - name: Validate version format
+        id: validate-version
+        run: |
+          if [[ ${{ github.event_name }} == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version_tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match 'vX.Y.Z' (e.g., v1.0.0). Got: $VERSION"
+            exit 1
+          fi
+          echo "VERSION_VALIDATED=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install Rust targets
         run: |
