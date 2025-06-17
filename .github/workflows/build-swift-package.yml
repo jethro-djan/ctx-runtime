@@ -191,7 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: main 
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download Package.swift
@@ -200,7 +200,7 @@ jobs:
           name: Package.swift
           path: .
 
-      - name: Commit to repository
+      - name: Commit and push
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
