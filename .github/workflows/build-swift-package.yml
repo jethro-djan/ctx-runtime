@@ -19,7 +19,7 @@ on:
 
 env:
   FRAMEWORK_NAME: "ContextRuntime"
-  SPM_REPO: "your-username/ContextRuntime-SPM"  # CHANGE THIS
+  SPM_REPO: "jethro-djan/ContextRuntime-SPM"  # CHANGE THIS
 
 permissions:
   contents: write
