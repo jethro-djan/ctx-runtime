@@ -147,13 +147,17 @@ jobs:
         run: |
           cd spm-repo
           
-          # Forcefully reinitialize package (overwriting existing files)
-          swift package init --type empty --name ${{ env.FRAMEWORK_NAME }} --force
+          # Completely reset the repository
+          rm -rf * .swiftpm .gitignore
+          git clean -fdx
           
-          # Remove any existing sources/tests
-          rm -rf Sources Tests
+          # Initialize fresh empty package
+          swift package init --type empty --name ${{ env.FRAMEWORK_NAME }}
           
-          # Copy the generated files
+          # Remove auto-generated files we don't need
+          rm -rf Package.resolved
+          
+          # Copy our generated files
           cp ../Package.swift .
           cp ../${{ env.FRAMEWORK_NAME }}.xcframework.zip .
           
@@ -161,21 +165,19 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # Force-add all changes
-          git add --all --force
+          # Add and commit everything
+          git add --all
+          git commit -m "Release ${{ steps.setup.outputs.VERSION }}" --allow-empty
           
-          # Commit (allow empty commits for version updates)
-          git commit --allow-empty -m "Release ${{ steps.setup.outputs.VERSION }}"
+          # Force push (handles both new and existing tags)
+          git tag -f ${{ steps.setup.outputs.VERSION }}
+          git push -f origin main --tags
           
-          # Force push tags (in case of re-releases)
-          git tag --force ${{ steps.setup.outputs.VERSION }}
-          git push --force origin main --tags
-          
-          # Create/update GitHub release
+          # Create/update release
           gh release create ${{ steps.setup.outputs.VERSION }} \
             ${{ env.FRAMEWORK_NAME }}.xcframework.zip \
-            --title "Release ${{ steps.setup.outputs.VERSION }}" \
-            --notes "XCFramework release for ${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --title "${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --notes "Automated release" \
             --repo ${{ env.SPM_REPO }} \
             --force
         env:
