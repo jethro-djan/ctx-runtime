@@ -1,0 +1,6 @@
+{
+  "inputs": {
+    "test_mode": "true",
+    "version_tag": "v1.0.0-test"
+  }
+}

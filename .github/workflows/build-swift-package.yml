@@ -4,6 +4,18 @@ on:
   push:
     tags: 
       - 'v*'  # Trigger on version tags (e.g., v1.0.0)
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Run in test mode (skip validation)'
+        required: false
+        default: 'false'
+        type: boolean
+      version_tag:
+        description: 'Version tag to simulate (e.g., v1.0.0)'
+        required: false
+        default: 'v1.0.0-test'
+        type: string
 
 permissions:
   contents: write
@@ -12,24 +24,49 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      # Step 1: Checkout code
       - uses: actions/checkout@v4
 
-      # Step 2: Validate version format (ADD THIS STEP EARLY!)
+      - name: Setup test environment
+        id: setup
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
+              echo "TEST_MODE=true" >> $GITHUB_OUTPUT
+              echo "VERSION=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+              echo "Running in TEST MODE with version: ${{ github.event.inputs.version_tag }}"
+            else
+              echo "TEST_MODE=false" >> $GITHUB_OUTPUT
+              echo "VERSION=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "TEST_MODE=false" >> $GITHUB_OUTPUT
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 3: Validate version format (skip in test mode)
       - name: Validate version format
         id: validate-version
         run: |
-          if [[ ${{ github.event_name }} == "workflow_dispatch" ]]; then
-            VERSION="${{ github.event.inputs.version_tag }}"
-          else
-            VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${{ steps.setup.outputs.VERSION }}"
+          
+          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
+            echo "⚠️ SKIPPING validation in test mode"
+            echo "VERSION_VALIDATED=$VERSION" >> $GITHUB_OUTPUT
+            exit 0
           fi
-
+          
+          # Normal validation for real runs
+          if [[ "${GITHUB_REF_TYPE}" != "tag" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            echo "::error::This workflow should only run on tags, but GITHUB_REF_TYPE is: ${GITHUB_REF_TYPE}"
+            exit 1
+          fi
+          
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Version must match 'vX.Y.Z' (e.g., v1.0.0). Got: $VERSION"
             exit 1
           fi
           echo "VERSION_VALIDATED=$VERSION" >> $GITHUB_OUTPUT
+          echo "Valid version tag: $VERSION"
 
       - name: Install Rust targets
         run: |
@@ -85,8 +122,25 @@ jobs:
       - name: Zip XCFramework
         run: zip -r ContextRuntime.xcframework.zip ContextRuntime.xcframework
 
+      # Generate checksum properly
+      - name: Generate checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(swift package compute-checksum ContextRuntime.xcframework.zip)
+          echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
+          echo "Generated checksum: $CHECKSUM"
+
       - name: Create Swift Package
         run: |
+          VERSION="${{ steps.setup.outputs.VERSION }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+          
+          # In test mode, use a placeholder URL
+          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
+            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
+            echo "⚠️ Using placeholder URL in test mode: $REPO_URL"
+          fi
+          
           mkdir -p ContextRuntimeSPM/Sources/ContextRuntime
           cp -R out/*.swift ContextRuntimeSPM/Sources/ContextRuntime/
           cat > ContextRuntimeSPM/Package.swift <<EOF
@@ -100,8 +154,8 @@ jobs:
               targets: [
                   .binaryTarget(
                       name: "ContextRuntimeFFI",
-                      url: "https://github.com/your/repo/releases/download/\${GITHUB_REF_NAME}/ContextRuntime.xcframework.zip",
-                      checksum: "$(shasum -a 256 ContextRuntime.xcframework.zip | cut -d ' ' -f 1)"
+                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
+                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
                   ),
                   .target(
                       name: "ContextRuntime",
@@ -115,10 +169,47 @@ jobs:
           )
           EOF
 
+      - name: Create root Package.swift
+        run: |
+          VERSION="${{ steps.setup.outputs.VERSION }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+          
+          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
+            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
+          fi
+          
+          cat > Package.swift <<EOF
+          // swift-tools-version:5.9
+          import PackageDescription
+          
+          let package = Package(
+              name: "ContextRuntime",
+              platforms: [.iOS(.v16)],
+              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
+              targets: [
+                  .binaryTarget(
+                      name: "ContextRuntime",
+                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
+                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
+                  )
+              ]
+          )
+          EOF
+
       - name: Upload Release Assets
+        if: steps.setup.outputs.TEST_MODE == 'false'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             ContextRuntime.xcframework.zip
-            ContextRuntimeSPM/Package.swift
+            Package.swift
+
+      - name: Test mode summary
+        if: steps.setup.outputs.TEST_MODE == 'true'
+        run: |
+          echo "🧪 TEST MODE COMPLETED SUCCESSFULLY!"
+          echo "Generated files:"
+          ls -la ContextRuntime.xcframework.zip Package.swift 2>/dev/null || echo "Files not found"
+          echo "Checksum: ${{ steps.checksum.outputs.CHECKSUM }}"
+          echo "Version: ${{ steps.setup.outputs.VERSION }}"
