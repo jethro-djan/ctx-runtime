@@ -174,12 +174,11 @@ jobs:
           git push -f origin main --tags
           
           # Create/update release
-          gh release create ${{ steps.setup.outputs.VERSION }} \
-            ${{ env.FRAMEWORK_NAME }}.xcframework.zip \
+          gh release create "${{ steps.setup.outputs.VERSION }}" \
+            "${{ env.FRAMEWORK_NAME }}.xcframework.zip" \
             --title "${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
             --notes "Automated release" \
-            --repo ${{ env.SPM_REPO }} \
-            --force
+            --repo "${{ env.SPM_REPO }}"
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
