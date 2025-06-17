@@ -142,45 +142,46 @@ jobs:
           echo ""
           echo "✅ Test completed successfully!"
 
-- name: Update SPM repo and create release
-  if: steps.setup.outputs.TEST_MODE == 'false'
-  run: |
-    cd spm-repo
-    
-    # Forcefully reinitialize package (overwriting existing files)
-    swift package init --type empty --name ${{ env.FRAMEWORK_NAME }} --force
-    
-    # Remove any existing sources/tests
-    rm -rf Sources Tests
-    
-    # Copy the generated files
-    cp ../Package.swift .
-    cp ../${{ env.FRAMEWORK_NAME }}.xcframework.zip .
-    
-    # Configure Git
-    git config --global user.name "GitHub Actions"
-    git config --global user.email "actions@github.com"
-    
-    # Force-add all changes
-    git add --all --force
-    
-    # Commit (allow empty commits for version updates)
-    git commit --allow-empty -m "Release ${{ steps.setup.outputs.VERSION }}"
-    
-    # Force push tags (in case of re-releases)
-    git tag --force ${{ steps.setup.outputs.VERSION }}
-    git push --force origin main --tags
-    
-    # Create/update GitHub release
-    gh release create ${{ steps.setup.outputs.VERSION }} \
-      ${{ env.FRAMEWORK_NAME }}.xcframework.zip \
-      --title "Release ${{ steps.setup.outputs.VERSION }}" \
-      --notes "XCFramework release for ${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
-      --repo ${{ env.SPM_REPO }} \
-      --force
-  env:
-    GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      - name: Verify release
+      - name: Update SPM repo and create release
+        if: steps.setup.outputs.TEST_MODE == 'false'
+        run: |
+          cd spm-repo
+          
+          # Forcefully reinitialize package (overwriting existing files)
+          swift package init --type empty --name ${{ env.FRAMEWORK_NAME }} --force
+          
+          # Remove any existing sources/tests
+          rm -rf Sources Tests
+          
+          # Copy the generated files
+          cp ../Package.swift .
+          cp ../${{ env.FRAMEWORK_NAME }}.xcframework.zip .
+          
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Force-add all changes
+          git add --all --force
+          
+          # Commit (allow empty commits for version updates)
+          git commit --allow-empty -m "Release ${{ steps.setup.outputs.VERSION }}"
+          
+          # Force push tags (in case of re-releases)
+          git tag --force ${{ steps.setup.outputs.VERSION }}
+          git push --force origin main --tags
+          
+          # Create/update GitHub release
+          gh release create ${{ steps.setup.outputs.VERSION }} \
+            ${{ env.FRAMEWORK_NAME }}.xcframework.zip \
+            --title "Release ${{ steps.setup.outputs.VERSION }}" \
+            --notes "XCFramework release for ${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --repo ${{ env.SPM_REPO }} \
+            --force
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Verify release 
         if: steps.setup.outputs.TEST_MODE == 'false'
         run: |
           echo "✅ Release created successfully!"
