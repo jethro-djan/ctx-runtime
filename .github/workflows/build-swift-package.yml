@@ -1,209 +1,223 @@
-name: Release iOS XCFramework
+name: XCFramework and SPM Release
 
 on:
   push:
     tags: 
-      - 'v*'  # Trigger on version tags (e.g., v1.0.0)
+      - 'v*'
   workflow_dispatch:
     inputs:
       test_mode:
-        description: 'Run in test mode (skip validation)'
+        description: 'Run in test mode'
         required: false
-        default: 'false'
+        default: false
         type: boolean
       version_tag:
-        description: 'Version tag to simulate (e.g., v1.0.0)'
+        description: 'Version tag (e.g., v1.0.0)'
         required: false
         default: 'v1.0.0-test'
         type: string
+
+env:
+  FRAMEWORK_NAME: "ContextRuntime"
+  SPM_REPO: "your-username/ContextRuntime-SPM"  # CHANGE THIS
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build_xcframework:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.setup.outputs.VERSION }}
+      checksum: ${{ steps.checksum.outputs.CHECKSUM }}
+      test_mode: ${{ steps.setup.outputs.TEST_MODE }}
+    
     steps:
-      # Step 1: Checkout code
       - uses: actions/checkout@v4
 
-      # Step 2: Set up environment variables for testing
-      - name: Setup test environment
+      - name: Setup environment
         id: setup
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
-              echo "TEST_MODE=true" >> $GITHUB_OUTPUT
-              echo "VERSION=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
-              echo "Running in TEST MODE with version: ${{ github.event.inputs.version_tag }}"
-            else
-              echo "TEST_MODE=false" >> $GITHUB_OUTPUT
-              echo "VERSION=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
-            fi
+            echo "VERSION=${{ inputs.version_tag }}" >> $GITHUB_OUTPUT
+            echo "TEST_MODE=${{ inputs.test_mode }}" >> $GITHUB_OUTPUT
           else
-            echo "TEST_MODE=false" >> $GITHUB_OUTPUT
             echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "TEST_MODE=false" >> $GITHUB_OUTPUT
           fi
 
-      # Step 3: Validate version format (skip in test mode)
-      - name: Validate version format
-        id: validate-version
-        run: |
-          VERSION="${{ steps.setup.outputs.VERSION }}"
-          
-          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
-            echo "⚠️ SKIPPING validation in test mode"
-            echo "VERSION_VALIDATED=$VERSION" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Normal validation for real runs
-          if [[ "${GITHUB_REF_TYPE}" != "tag" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
-            echo "::error::This workflow should only run on tags, but GITHUB_REF_TYPE is: ${GITHUB_REF_TYPE}"
-            exit 1
-          fi
-          
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must match 'vX.Y.Z' (e.g., v1.0.0). Got: $VERSION"
-            exit 1
-          fi
-          echo "VERSION_VALIDATED=$VERSION" >> $GITHUB_OUTPUT
-          echo "Valid version tag: $VERSION"
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Rust targets
         run: |
           rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
 
-      - name: Add UniFFI
-        run: cargo add uniffi  
-
       - name: Build Rust libraries
         run: |
-          # 1. Build all targets
-          cargo build --release --target aarch64-apple-ios
-          cargo build --release --target x86_64-apple-ios
-          cargo build --release --target aarch64-apple-ios-sim
+          # Clean previous builds
+          cargo clean
           
-          # 2. Create directory structure FIRST
+          # Build with explicit library output
+          cargo build --lib --release --target aarch64-apple-ios
+          cargo build --lib --release --target x86_64-apple-ios
+          cargo build --lib --release --target aarch64-apple-ios-sim
+          
+          # Debug: Find the actual library name
+          echo "Built libraries:"
+          find target -name "*.a" -exec ls -la {} \;
+          
+          # Get the first static library found (should match your crate name)
+          LIB_PATH=$(find target -name "*.a" | grep release | head -1)
+          LIB_NAME=$(basename $LIB_PATH)
+          echo "Detected library name: $LIB_NAME"
+          echo "LIB_NAME=$LIB_NAME" >> $GITHUB_ENV
+          
+          # Create universal lib using detected name
           mkdir -p target/universal-ios-sim/release
-          
-          # 3. Then run lipo
           lipo -create \
-            target/x86_64-apple-ios/release/libcontext_runtime.a \
-            target/aarch64-apple-ios-sim/release/libcontext_runtime.a \
-            -output target/universal-ios-sim/release/libcontext_runtime.a
-          
-          # 4. Verify output
-          file target/universal-ios-sim/release/libcontext_runtime.a
-
-      - name: Inspect target directory
-        run: |
-          echo "=== Target directory structure ==="
-          find target -type f -name "*.a" | grep -i context_runtime
-          echo "================================"
+            "target/x86_64-apple-ios/release/$LIB_NAME" \
+            "target/aarch64-apple-ios-sim/release/$LIB_NAME" \
+            -output "target/universal-ios-sim/release/$LIB_NAME"
 
       - name: Generate UniFFI bindings
         run: |
-          cargo run --bin uniffi-bindgen generate --library target/aarch64-apple-ios/release/libcontext_runtime.a --language swift --out-dir out
-          cargo run --bin uniffi-bindgen-swift -- target/aarch64-apple-ios/release/libcontext_runtime.a build/swift/Modules --xcframework --modulemap --modulemap-filename context.modulemap
+          cargo run --bin uniffi-bindgen generate \
+            --library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
+            --language swift \
+            --out-dir out
 
       - name: Create XCFramework
         run: |
           mkdir -p xcframework/Headers
           cp out/*.h xcframework/Headers/
-          cp out/*.modulemap xcframework/Headers/
           xcodebuild -create-xcframework \
-              -library target/aarch64-apple-ios/release/libcontext_runtime.a \
-              -headers xcframework/Headers \
-              -library target/universal-ios-sim/release/libcontext_runtime.a \
-              -headers xcframework/Headers \
-              -output ContextRuntime.xcframework
-          mkdir -p ContextRuntime.xcframework/swift-interfaces
-          cp out/*.swift ContextRuntime.xcframework/swift-interfaces/
+            -library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
+            -headers xcframework/Headers \
+            -library target/universal-ios-sim/release/${{ env.LIB_NAME }} \
+            -headers xcframework/Headers \
+            -output ${{ env.FRAMEWORK_NAME }}.xcframework
+          zip -r ${{ env.FRAMEWORK_NAME }}.xcframework.zip ${{ env.FRAMEWORK_NAME }}.xcframework
 
-      - name: Zip XCFramework
-        run: zip -r ContextRuntime.xcframework.zip ContextRuntime.xcframework
-
-      # Generate checksum properly
-      - name: Generate checksum
+      - name: Calculate checksum
         id: checksum
         run: |
-          CHECKSUM=$(swift package compute-checksum ContextRuntime.xcframework.zip)
+          CHECKSUM=$(swift package compute-checksum ${{ env.FRAMEWORK_NAME }}.xcframework.zip)
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
-          echo "Generated checksum: $CHECKSUM"
+          echo "Checksum: $CHECKSUM"
 
-      # Create root Package.swift
       - name: Generate Package.swift
         run: |
-          VERSION="${{ steps.setup.outputs.VERSION }}"
-          REPO_URL="https://github.com/${{ github.repository }}"
-          
-          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
-            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
-          fi
-          
           cat > Package.swift <<EOF
           // swift-tools-version:5.9
           import PackageDescription
           
           let package = Package(
-              name: "ContextRuntime",
+              name: "${{ env.FRAMEWORK_NAME }}",
               platforms: [.iOS(.v16)],
-              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
+              products: [.library(name: "${{ env.FRAMEWORK_NAME }}", targets: ["${{ env.FRAMEWORK_NAME }}"])],
               targets: [
                   .binaryTarget(
-                      name: "ContextRuntime",
-                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
+                      name: "${{ env.FRAMEWORK_NAME }}",
+                      url: "https://github.com/${{ github.repository }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.FRAMEWORK_NAME }}.xcframework.zip",
                       checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
                   )
               ]
           )
           EOF
 
-      # Save Package.swift for later commit
-      - name: Persist Package.swift
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      - name: Verify files exist
+        run: |
+          echo "Checking for required files..."
+          ls -la
+          if [ ! -f "${{ env.FRAMEWORK_NAME }}.xcframework.zip" ]; then
+            echo "❌ XCFramework zip file not found!"
+            exit 1
+          fi
+          if [ ! -f "Package.swift" ]; then
+            echo "❌ Package.swift file not found!"
+            exit 1
+          fi
+          echo "✅ All required files exist"
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cp "${{ env.FRAMEWORK_NAME }}.xcframework.zip" artifacts/
+          cp Package.swift artifacts/
+          echo "Artifacts prepared for ${{ steps.setup.outputs.TEST_MODE == 'true' && 'local testing' || 'release' }}"
+
+      # Only upload artifacts in CI (not in act)
+      - name: Upload artifacts (CI only)
+        if: runner.os != 'Linux' && steps.setup.outputs.TEST_MODE == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: Package.swift
-          path: Package.swift
+          name: xcframework-artifacts
+          path: artifacts/*
 
-      - name: Upload Release Assets
-        if: steps.setup.outputs.TEST_MODE == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          files: ContextRuntime.xcframework.zip
-
-      - name: Test mode summary
-        if: steps.setup.outputs.TEST_MODE == 'true'
-        run: |
-          echo "🧪 TEST MODE COMPLETED SUCCESSFULLY!"
-          echo "Generated files:"
-          ls -la ContextRuntime.xcframework.zip Package.swift 2>/dev/null || echo "Files not found"
-          echo "Checksum: ${{ steps.checksum.outputs.CHECKSUM }}"
-          echo "Version: ${{ steps.setup.outputs.VERSION }}"
-
-  commit_package:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+  publish_spm:
+    needs: build_xcframework
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main 
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download Package.swift
+      - name: Download artifacts
+        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
         uses: actions/download-artifact@v4
         with:
-          name: Package.swift
-          path: .
+          name: xcframework-artifacts
+          path: artifacts
 
-      - name: Commit and push
+      - name: Checkout SPM repo (CI only)
+        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SPM_REPO }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: spm-repo
+
+      # For local testing, just show what would happen
+      - name: Simulate SPM publish (local)
+        if: runner.os == 'Linux' || needs.build_xcframework.outputs.test_mode == 'true'
         run: |
+          echo "Would publish to SPM repo:"
+          echo "Version: ${{ needs.build_xcframework.outputs.version }}"
+          echo "Checksum: ${{ needs.build_xcframework.outputs.checksum }}"
+          if [ -d "artifacts" ]; then
+            ls -la artifacts/
+          else
+            echo "No artifacts directory found (expected in local testing)"
+          fi
+
+      # Real publish for CI
+      - name: Publish to SPM repo (CI)
+        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
+        run: |
+          cd spm-repo
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add Package.swift
-          git commit -m "chore: Add Package.swift for SPM support [auto-generated]"
-          git push
+          
+          if [ ! -f Package.swift ]; then
+            swift package init --type empty
+            rm -rf Sources Tests
+          fi
+          
+          cp ../artifacts/Package.swift .
+          git add .
+          git commit -m "Release ${{ needs.build_xcframework.outputs.version }}"
+          git tag ${{ needs.build_xcframework.outputs.version }}
+          git push origin main --tags
+
+  release:
+    needs: [build_xcframework, publish_spm]
+    runs-on: ubuntu-latest
+    if: needs.build_xcframework.outputs.test_mode == 'false'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: xcframework-artifacts
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/${{ env.FRAMEWORK_NAME }}.xcframework.zip
