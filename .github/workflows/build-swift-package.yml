@@ -119,7 +119,7 @@ jobs:
               targets: [
                   .binaryTarget(
                       name: "${{ env.FRAMEWORK_NAME }}",
-                      url: "https://github.com/${{ github.repository }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.FRAMEWORK_NAME }}.xcframework.zip",
+                      url: "https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.FRAMEWORK_NAME }}.xcframework.zip",
                       checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
                   )
               ]
@@ -201,6 +201,7 @@ jobs:
           fi
           
           cp ../artifacts/Package.swift .
+          swift package init --type library
           git add .
           git commit -m "Release ${{ needs.build_xcframework.outputs.version }}"
           git tag ${{ needs.build_xcframework.outputs.version }}
@@ -217,7 +218,13 @@ jobs:
           name: xcframework-artifacts
           path: artifacts
 
+      - name: Checkout SPM repo for release
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SPM_REPO }}
+          token: ${{ secrets.GH_TOKEN }}
+
       - uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           files: artifacts/${{ env.FRAMEWORK_NAME }}.xcframework.zip
