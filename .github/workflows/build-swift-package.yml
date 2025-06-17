@@ -124,6 +124,7 @@ jobs:
       - name: Zip XCFramework
         run: zip -r ContextRuntime.xcframework.zip ContextRuntime.xcframework
 
+      # Generate checksum properly
       - name: Generate checksum
         id: checksum
         run: |
@@ -131,7 +132,8 @@ jobs:
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
           echo "Generated checksum: $CHECKSUM"
 
-      - name: Create root Package.swift
+      # Create root Package.swift
+      - name: Generate Package.swift
         run: |
           VERSION="${{ steps.setup.outputs.VERSION }}"
           REPO_URL="https://github.com/${{ github.repository }}"
@@ -158,52 +160,20 @@ jobs:
           )
           EOF
 
-      - name: Create Swift Package
-        run: |
-          VERSION="${{ steps.setup.outputs.VERSION }}"
-          REPO_URL="https://github.com/${{ github.repository }}"
-          
-          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
-            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
-            echo "⚠️ Using placeholder URL in test mode: $REPO_URL"
-          fi
-          
-          mkdir -p ContextRuntimeSPM/Sources/ContextRuntime
-          cp -R out/*.swift ContextRuntimeSPM/Sources/ContextRuntime/
-          cat > ContextRuntimeSPM/Package.swift <<EOF
-          // swift-tools-version:5.9
-          import PackageDescription
-          
-          let package = Package(
-              name: "ContextRuntime",
-              platforms: [.iOS(.v16)],
-              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
-              targets: [
-                  .binaryTarget(
-                      name: "ContextRuntimeFFI",
-                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
-                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
-                  ),
-                  .target(
-                      name: "ContextRuntime",
-                      dependencies: ["ContextRuntimeFFI"],
-                      path: "Sources/ContextRuntime",
-                      swiftSettings: [
-                          .enableExperimentalFeature("ForeignReferenceType")
-                      ]
-                  )
-              ]
-          )
-          EOF
+      # Save Package.swift for later commit
+      - name: Persist Package.swift
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Package.swift
+          path: Package.swift
 
       - name: Upload Release Assets
         if: steps.setup.outputs.TEST_MODE == 'false'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: |
-            ContextRuntime.xcframework.zip
-            Package.swift
+          files: ContextRuntime.xcframework.zip
 
       - name: Test mode summary
         if: steps.setup.outputs.TEST_MODE == 'true'
@@ -213,3 +183,27 @@ jobs:
           ls -la ContextRuntime.xcframework.zip Package.swift 2>/dev/null || echo "Files not found"
           echo "Checksum: ${{ steps.checksum.outputs.CHECKSUM }}"
           echo "Version: ${{ steps.setup.outputs.VERSION }}"
+
+  commit_package:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Package.swift
+        uses: actions/download-artifact@v4
+        with:
+          name: Package.swift
+          path: .
+
+      - name: Commit to repository
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add Package.swift
+          git commit -m "chore: Add Package.swift for SPM support [auto-generated]"
+          git push
