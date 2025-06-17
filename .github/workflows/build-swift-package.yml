@@ -24,8 +24,10 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
+      # Step 1: Checkout code
       - uses: actions/checkout@v4
 
+      # Step 2: Set up environment variables for testing
       - name: Setup test environment
         id: setup
         run: |
@@ -122,7 +124,6 @@ jobs:
       - name: Zip XCFramework
         run: zip -r ContextRuntime.xcframework.zip ContextRuntime.xcframework
 
-      # Generate checksum properly
       - name: Generate checksum
         id: checksum
         run: |
@@ -130,12 +131,38 @@ jobs:
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
           echo "Generated checksum: $CHECKSUM"
 
+      - name: Create root Package.swift
+        run: |
+          VERSION="${{ steps.setup.outputs.VERSION }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+          
+          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
+            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
+          fi
+          
+          cat > Package.swift <<EOF
+          // swift-tools-version:5.9
+          import PackageDescription
+          
+          let package = Package(
+              name: "ContextRuntime",
+              platforms: [.iOS(.v16)],
+              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
+              targets: [
+                  .binaryTarget(
+                      name: "ContextRuntime",
+                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
+                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
+                  )
+              ]
+          )
+          EOF
+
       - name: Create Swift Package
         run: |
           VERSION="${{ steps.setup.outputs.VERSION }}"
           REPO_URL="https://github.com/${{ github.repository }}"
           
-          # In test mode, use a placeholder URL
           if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
             REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
             echo "⚠️ Using placeholder URL in test mode: $REPO_URL"
@@ -164,33 +191,6 @@ jobs:
                       swiftSettings: [
                           .enableExperimentalFeature("ForeignReferenceType")
                       ]
-                  )
-              ]
-          )
-          EOF
-
-      - name: Create root Package.swift
-        run: |
-          VERSION="${{ steps.setup.outputs.VERSION }}"
-          REPO_URL="https://github.com/${{ github.repository }}"
-          
-          if [[ "${{ steps.setup.outputs.TEST_MODE }}" == "true" ]]; then
-            REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO"
-          fi
-          
-          cat > Package.swift <<EOF
-          // swift-tools-version:5.9
-          import PackageDescription
-          
-          let package = Package(
-              name: "ContextRuntime",
-              platforms: [.iOS(.v16)],
-              products: [.library(name: "ContextRuntime", targets: ["ContextRuntime"])],
-              targets: [
-                  .binaryTarget(
-                      name: "ContextRuntime",
-                      url: "${REPO_URL}/releases/download/${VERSION}/ContextRuntime.xcframework.zip",
-                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
                   )
               ]
           )
