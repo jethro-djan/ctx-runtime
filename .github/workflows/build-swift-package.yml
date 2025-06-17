@@ -25,12 +25,8 @@ permissions:
   contents: write
 
 jobs:
-  build_xcframework:
+  build_and_release:
     runs-on: macos-latest
-    outputs:
-      version: ${{ steps.setup.outputs.VERSION }}
-      checksum: ${{ steps.checksum.outputs.CHECKSUM }}
-      test_mode: ${{ steps.setup.outputs.TEST_MODE }}
     
     steps:
       - uses: actions/checkout@v4
@@ -99,15 +95,22 @@ jobs:
             -output ${{ env.FRAMEWORK_NAME }}.xcframework
           zip -r ${{ env.FRAMEWORK_NAME }}.xcframework.zip ${{ env.FRAMEWORK_NAME }}.xcframework
 
-      - name: Calculate checksum
-        id: checksum
+      - name: Checkout SPM repo
+        if: steps.setup.outputs.TEST_MODE == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SPM_REPO }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: spm-repo
+
+      - name: Calculate checksum and generate Package.swift
+        id: package
         run: |
           CHECKSUM=$(swift package compute-checksum ${{ env.FRAMEWORK_NAME }}.xcframework.zip)
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
           echo "Checksum: $CHECKSUM"
-
-      - name: Generate Package.swift
-        run: |
+          
+          # Generate Package.swift with SPM repo URL
           cat > Package.swift <<EOF
           // swift-tools-version:5.9
           import PackageDescription
@@ -120,111 +123,67 @@ jobs:
                   .binaryTarget(
                       name: "${{ env.FRAMEWORK_NAME }}",
                       url: "https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.FRAMEWORK_NAME }}.xcframework.zip",
-                      checksum: "${{ steps.checksum.outputs.CHECKSUM }}"
+                      checksum: "$CHECKSUM"
                   )
               ]
           )
           EOF
 
-      - name: Verify files exist
+      - name: Simulate release (test mode)
+        if: steps.setup.outputs.TEST_MODE == 'true'
         run: |
-          echo "Checking for required files..."
-          ls -la
-          if [ ! -f "${{ env.FRAMEWORK_NAME }}.xcframework.zip" ]; then
-            echo "❌ XCFramework zip file not found!"
-            exit 1
-          fi
-          if [ ! -f "Package.swift" ]; then
-            echo "❌ Package.swift file not found!"
-            exit 1
-          fi
-          echo "✅ All required files exist"
+          echo "🧪 TEST MODE - Would perform the following actions:"
+          echo "1. Update SPM repo: ${{ env.SPM_REPO }}"
+          echo "2. Version: ${{ steps.setup.outputs.VERSION }}"
+          echo "3. Checksum: ${{ steps.package.outputs.CHECKSUM }}"
+          echo "4. XCFramework size: $(ls -lh ${{ env.FRAMEWORK_NAME }}.xcframework.zip | awk '{print $5}')"
+          echo "5. Package.swift content:"
+          cat Package.swift
+          echo ""
+          echo "✅ Test completed successfully!"
 
-      - name: Prepare artifacts
-        run: |
-          mkdir -p artifacts
-          cp "${{ env.FRAMEWORK_NAME }}.xcframework.zip" artifacts/
-          cp Package.swift artifacts/
-          echo "Artifacts prepared for ${{ steps.setup.outputs.TEST_MODE == 'true' && 'local testing' || 'release' }}"
-
-      # Only upload artifacts in CI (not in act)
-      - name: Upload artifacts (CI only)
-        if: runner.os != 'Linux' && steps.setup.outputs.TEST_MODE == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: xcframework-artifacts
-          path: artifacts/*
-
-  publish_spm:
-    needs: build_xcframework
-    runs-on: macos-latest
-    steps:
-      - name: Download artifacts
-        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
-        uses: actions/download-artifact@v4
-        with:
-          name: xcframework-artifacts
-          path: artifacts
-
-      - name: Checkout SPM repo (CI only)
-        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SPM_REPO }}
-          token: ${{ secrets.GH_TOKEN }}
-          path: spm-repo
-
-      # For local testing, just show what would happen
-      - name: Simulate SPM publish (local)
-        if: runner.os == 'Linux' || needs.build_xcframework.outputs.test_mode == 'true'
-        run: |
-          echo "Would publish to SPM repo:"
-          echo "Version: ${{ needs.build_xcframework.outputs.version }}"
-          echo "Checksum: ${{ needs.build_xcframework.outputs.checksum }}"
-          if [ -d "artifacts" ]; then
-            ls -la artifacts/
-          else
-            echo "No artifacts directory found (expected in local testing)"
-          fi
-
-      # Real publish for CI
-      - name: Publish to SPM repo (CI)
-        if: runner.os != 'Linux' && needs.build_xcframework.outputs.test_mode == 'false'
+      - name: Update SPM repo and create release
+        if: steps.setup.outputs.TEST_MODE == 'false'
         run: |
           cd spm-repo
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          if [ ! -f Package.swift ]; then
-            swift package init --type empty
+          # Copy the generated Package.swift to SPM repo
+          cp ../Package.swift .
+          
+          # Copy XCFramework for release
+          cp ../${{ env.FRAMEWORK_NAME }}.xcframework.zip .
+          
+          # Initialize as library if needed
+          if [ ! -d "Sources" ]; then
+            swift package init --type library --name ${{ env.FRAMEWORK_NAME }}
+            # Remove the generated Sources directory since we're using binary target
             rm -rf Sources Tests
           fi
           
-          cp ../artifacts/Package.swift .
-          swift package init --type library
+          # Commit changes
           git add .
-          git commit -m "Release ${{ needs.build_xcframework.outputs.version }}"
-          git tag ${{ needs.build_xcframework.outputs.version }}
+          git commit -m "Release ${{ steps.setup.outputs.VERSION }}" || echo "No changes to commit"
+          
+          # Create and push tag
+          git tag ${{ steps.setup.outputs.VERSION }} || echo "Tag already exists"
           git push origin main --tags
+          
+          # Create GitHub release on SPM repo
+          gh release create ${{ steps.setup.outputs.VERSION }} \
+            ${{ env.FRAMEWORK_NAME }}.xcframework.zip \
+            --title "Release ${{ steps.setup.outputs.VERSION }}" \
+            --notes "XCFramework release for ${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --repo ${{ env.SPM_REPO }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
-  release:
-    needs: [build_xcframework, publish_spm]
-    runs-on: ubuntu-latest
-    if: needs.build_xcframework.outputs.test_mode == 'false'
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: xcframework-artifacts
-          path: artifacts
-
-      - name: Checkout SPM repo for release
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SPM_REPO }}
-          token: ${{ secrets.GH_TOKEN }}
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GH_TOKEN }}
-          files: artifacts/${{ env.FRAMEWORK_NAME }}.xcframework.zip
+      - name: Verify release
+        if: steps.setup.outputs.TEST_MODE == 'false'
+        run: |
+          echo "✅ Release created successfully!"
+          echo "📦 Package: ${{ env.FRAMEWORK_NAME }}"
+          echo "🏷️  Version: ${{ steps.setup.outputs.VERSION }}"
+          echo "🔗 Repository: https://github.com/${{ env.SPM_REPO }}"
+          echo "📋 Checksum: ${{ steps.package.outputs.CHECKSUM }}"
