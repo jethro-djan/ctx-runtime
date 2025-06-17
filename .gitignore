@@ -3,3 +3,4 @@
 
 # Rust related
 /target
+.actrc

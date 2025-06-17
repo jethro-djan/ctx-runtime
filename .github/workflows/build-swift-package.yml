@@ -5,6 +5,9 @@ on:
     tags: 
       - 'v*'  # Trigger on version tags (e.g., v1.0.0)
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
@@ -35,20 +38,35 @@ jobs:
       - name: Add UniFFI
         run: cargo add uniffi  
 
-      - name: Generate UniFFI bindings
-        run: |
-          cargo run --bin uniffi-bindgen generate --library target/release/libcontext_runtime.a --language swift --out-dir out
-          cargo run --bin uniffi-bindgen-swift -- target/release/libcontext_runtime.a build/swift/Modules --xcframework --modulemap --modulemap-filename context.modulemap
-
       - name: Build Rust libraries
         run: |
+          # 1. Build all targets
           cargo build --release --target aarch64-apple-ios
           cargo build --release --target x86_64-apple-ios
           cargo build --release --target aarch64-apple-ios-sim
+          
+          # 2. Create directory structure FIRST
+          mkdir -p target/universal-ios-sim/release
+          
+          # 3. Then run lipo
           lipo -create \
-              target/x86_64-apple-ios/release/libcontext_runtime.a \
-              target/aarch64-apple-ios-sim/release/libcontext_runtime.a \
-              -output target/universal-ios-sim/release/libcontext_runtime.a
+            target/x86_64-apple-ios/release/libcontext_runtime.a \
+            target/aarch64-apple-ios-sim/release/libcontext_runtime.a \
+            -output target/universal-ios-sim/release/libcontext_runtime.a
+          
+          # 4. Verify output
+          file target/universal-ios-sim/release/libcontext_runtime.a
+
+      - name: Inspect target directory
+        run: |
+          echo "=== Target directory structure ==="
+          find target -type f -name "*.a" | grep -i context_runtime
+          echo "================================"
+
+      - name: Generate UniFFI bindings
+        run: |
+          cargo run --bin uniffi-bindgen generate --library target/aarch64-apple-ios/release/libcontext_runtime.a --language swift --out-dir out
+          cargo run --bin uniffi-bindgen-swift -- target/aarch64-apple-ios/release/libcontext_runtime.a build/swift/Modules --xcframework --modulemap --modulemap-filename context.modulemap
 
       - name: Create XCFramework
         run: |
@@ -98,8 +116,9 @@ jobs:
           EOF
 
       - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             ContextRuntime.xcframework.zip
             ContextRuntimeSPM/Package.swift
