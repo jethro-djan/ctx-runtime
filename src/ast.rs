@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use nom_locate::LocatedSpan;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ConTeXtNode {
     Document {
         preamble: Vec<ConTeXtNode>,
@@ -31,29 +32,43 @@ pub enum ConTeXtNode {
     },
 }
 
-#[derive(Debug, PartialEq, Clone)]
+impl ConTeXtNode {
+    pub fn span(&self) -> Option<&SourceSpan> {
+        match self {
+            ConTeXtNode::Command { span, .. } => Some(span),
+            ConTeXtNode::StartStop { span, .. } => Some(span),
+            ConTeXtNode::Text { span, .. } => Some(span),
+            ConTeXtNode::Comment { span, .. } => Some(span),
+            ConTeXtNode::Document { .. } => None,
+        }
+    }
+    
+    pub fn children(&self) -> Vec<&ConTeXtNode> {
+        match self {
+            ConTeXtNode::Document { preamble, body } => {
+                preamble.iter().chain(body.iter()).collect()
+            }
+            ConTeXtNode::Command { arguments, .. } => arguments.iter().collect(),
+            ConTeXtNode::StartStop { content, .. } => content.iter().collect(),
+            ConTeXtNode::Text { .. } | ConTeXtNode::Comment { .. } => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CommandStyle {
     TexStyle,
     ContextStyle,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Command {
-    pub name: String,
-    pub style: CommandStyle,
-    pub arg_style: ArgumentStyle,
-    pub options: Vec<String>,
-    pub arguments: Vec<ConTeXtNode>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ArgumentStyle {
     Explicit,
     LineEnding,
     GroupScoped,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceSpan {
     pub start: usize,
     pub end: usize,
@@ -73,22 +88,18 @@ impl From<LocatedSpan<&str>> for SourceSpan {
 }
 
 impl SourceSpan {
-    /// Get the line and column of the start position
     pub fn line_col(&self) -> (usize, usize) {
         (self.start_line, self.start_col)
     }
     
-    /// Get the byte range of this span
     pub fn range(&self) -> std::ops::Range<usize> {
         self.start..self.end
     }
     
-    /// Get the length of this span in bytes
     pub fn len(&self) -> usize {
         self.end - self.start
     }
     
-    /// Check if this span is empty
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }

@@ -1,11 +1,18 @@
 pub mod parser;
 pub mod syntax;
 pub mod highlight;
-pub mod workspace;
 pub mod ast;
 pub mod runtime;
+pub mod ffi;
+pub mod diagnostic;
 
-use highlight::Highlight;
+use crate::highlight::HighlightKind;
+use crate::ffi::{
+    HighlightFfi, FfiRange, CompileResultFfi, DiagnosticFfi,
+    ContextRuntimeHandle,
+};
+
+uniffi::include_scaffolding!("context");
 
 #[cfg(test)]
 mod tests {

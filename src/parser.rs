@@ -10,9 +10,13 @@ use nom::{
 use nom_locate::LocatedSpan;
 use std::collections::HashMap;
 
-use crate::ast::{ArgumentStyle, CommandStyle, ConTeXtNode, SourceSpan};
+use crate::ast::{ArgumentStyle, CommandStyle, ConTeXtNode};
 
 type Span<'a> = LocatedSpan<&'a str>;
+
+pub fn parse(input: &str) -> Option<ConTeXtNode> {
+    parse_document(input).ok()
+}
 
 pub fn parse_document(input: &str) -> Result<ConTeXtNode, nom::Err<nom::error::Error<Span<'_>>>> {
     let span = Span::new(input);

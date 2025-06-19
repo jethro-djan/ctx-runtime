@@ -1,8 +1,5 @@
-use crate::syntax::TexSyntaxKind;
-use rowan::{SyntaxNode, NodeOrToken};
 use std::ops::Range;
-
-use crate::syntax;
+use crate::ast::ConTeXtNode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Highlight {
@@ -17,52 +14,76 @@ pub enum HighlightKind {
     Option,       
     Text,
     Comment,
-    Environment, 
+    Environment,
 }
 
-pub fn run(node: &syntax::SyntaxNode) -> Vec<Highlight> {
+impl HighlightKind {
+    pub fn to_string(&self) -> String {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Command => "command",
+            Self::Option => "option",
+            Self::Text => "text",
+            Self::Comment => "comment",
+            Self::Environment => "environment",
+        }.to_string()
+    }
+}
+
+/// Main entry point for AST-based highlighting
+pub fn highlight(node: &ConTeXtNode) -> Vec<Highlight> {
     let mut highlights = Vec::new();
-    let mut stack = Vec::new();
-    
-    // Depth-first traversal
-    for event in node.preorder_with_tokens() {
-        match event {
-            rowan::WalkEvent::Enter(node_or_token) => {
-                match node_or_token {
-                    NodeOrToken::Node(n) => {
-                        stack.push(n.kind());
-                    }
-                    NodeOrToken::Token(t) => {
-                        let kind = match t.kind() {
-                            TexSyntaxKind::CommandName => HighlightKind::Command,
-                            TexSyntaxKind::EnvName => HighlightKind::Environment,
-                            TexSyntaxKind::OptionGroup => HighlightKind::Option,
-                            TexSyntaxKind::Comment => HighlightKind::Comment,
-                            TexSyntaxKind::Text => HighlightKind::Text,
-                            _ => stack.last().copied()
-                                .and_then(|k| match k {
-                                    TexSyntaxKind::Command => Some(HighlightKind::Command),
-                                    TexSyntaxKind::StartStop => Some(HighlightKind::Keyword),
-                                    _ => None
-                                })
-                                .unwrap_or(HighlightKind::Text),
-                        };
-                        
-                        let range = t.text_range();
-                        highlights.push(Highlight {
-                            range: range.start().into()..range.end().into(),
-                            kind,
-                        });
-                    }
-                }
+    highlight_node(node, &mut highlights);
+    highlights
+}
+
+/// Highlight AST nodes directly
+fn highlight_node(node: &ConTeXtNode, highlights: &mut Vec<Highlight>) {
+    match node {
+        ConTeXtNode::Command { name, options, arguments, span, .. } => {
+            highlights.push(Highlight {
+                range: span.start..span.end,
+                kind: HighlightKind::Command,
+            });
+            
+            for arg in arguments {
+                highlight_node(arg, highlights);
             }
-            rowan::WalkEvent::Leave(node_or_token) => {
-                if let NodeOrToken::Node(_) = node_or_token {
-                    stack.pop();
-                }
+        },
+        
+        ConTeXtNode::StartStop { content, span, .. } => {
+            highlights.push(Highlight {
+                range: span.start..span.end,
+                kind: HighlightKind::Environment,
+            });
+            
+            // Highlight content recursively
+            for child in content {
+                highlight_node(child, highlights);
+            }
+        },
+        
+        ConTeXtNode::Text { span, .. } => {
+            highlights.push(Highlight {
+                range: span.start..span.end,
+                kind: HighlightKind::Text,
+            });
+        },
+        
+        ConTeXtNode::Comment { span, .. } => {
+            highlights.push(Highlight {
+                range: span.start..span.end,
+                kind: HighlightKind::Comment,
+            });
+        },
+        
+        ConTeXtNode::Document { preamble, body } => {
+            for node in preamble {
+                highlight_node(node, highlights);
+            }
+            for node in body {
+                highlight_node(node, highlights);
             }
         }
     }
-    
-    highlights
 }

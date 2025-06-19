@@ -1,0 +1,46 @@
+namespace context {};
+
+interface ContextRuntimeHandle {
+	constructor();
+	boolean open(string uri, string text);
+	boolean update(string uri, string text);
+	void close(string uri);
+	string? get_document_source(string uri);
+	sequence<HighlightFfi> get_highlights(string uri);
+	sequence<DiagnosticFfi> get_diagnostics(string uri);
+	CompileResultFfi compile(string uri);
+};
+
+dictionary HighlightFfi {
+	FfiRange range;
+	string kind;
+};
+
+dictionary DiagnosticFfi {
+	FfiRange range;
+	string severity;
+	string message;
+	string source;
+};
+
+dictionary CompileResultFfi {
+	boolean success;
+	string? pdf_path;
+	string log;
+	sequence<DiagnosticFfi> errors;
+	sequence<DiagnosticFfi> warnings;
+};
+
+enum HighlightKind {
+    "Keyword",      
+    "Command",      
+    "Option",       
+    "Text",
+    "Comment",
+    "Environment", 
+};
+
+dictionary FfiRange {
+	u32 start;
+	u32 end;
+};

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use rowan::{GreenNodeBuilder, SyntaxKind};
 use crate::ast::ConTeXtNode;
 use rowan::Language;
@@ -7,26 +6,25 @@ use rowan::Language;
 #[repr(u16)]
 pub enum TexSyntaxKind {
     // Document structure
-    Document,
-    Preamble,
-    Body,
+    DOCUMENT,
+    PREAMBLE,
+    BODY,
     
     // Node types
-    Command,
-    StartStop,
-    Text,
-    Comment,
-    OptionGroup,
+    COMMAND,
+    STARTSTOP,
+    TEXT,
+    COMMENT,
+    OPTIONGROUP,
     
     // Token subtypes
-    CommandName,
-    OptionKey,
-    OptionValue,
-    Punctuation,
-    EnvName,
+    COMMANDNAME,
+    OPTIONKEY,
+    OPTIONVALUE,
+    PUNCTUATION,
+    ENVNAME,
 }
 
-// 2. Implement Rowan Language trait
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ConTeXtLanguage {}
 
@@ -42,7 +40,6 @@ impl Language for ConTeXtLanguage {
     }
 }
 
-// 3. From/Into implementations
 impl From<TexSyntaxKind> for SyntaxKind {
     fn from(kind: TexSyntaxKind) -> Self {
         SyntaxKind(kind as u16)
@@ -55,26 +52,24 @@ impl From<SyntaxKind> for TexSyntaxKind {
     }
 }
 
-// 4. Type aliases for convenience
 pub type SyntaxNode = rowan::SyntaxNode<ConTeXtLanguage>;
 pub type SyntaxToken = rowan::SyntaxToken<ConTeXtLanguage>;
 pub type GreenNode = rowan::GreenNode;
 
-// 5. Core conversion function
 pub fn ast_to_rowan(root_node: ConTeXtNode) -> GreenNode {
     let mut builder = GreenNodeBuilder::new();
     
     match root_node {
         ConTeXtNode::Document { preamble, body } => {
-            builder.start_node(TexSyntaxKind::Document.into());
+            builder.start_node(TexSyntaxKind::DOCUMENT.into());
             
-            builder.start_node(TexSyntaxKind::Preamble.into());
+            builder.start_node(TexSyntaxKind::PREAMBLE.into());
             for node in preamble {
                 add_node(&mut builder, &node);
             }
             builder.finish_node();
             
-            builder.start_node(TexSyntaxKind::Body.into());
+            builder.start_node(TexSyntaxKind::BODY.into());
             for node in body {
                 add_node(&mut builder, &node);
             }
@@ -84,7 +79,7 @@ pub fn ast_to_rowan(root_node: ConTeXtNode) -> GreenNode {
         }
         other_node => {
 
-            builder.start_node(TexSyntaxKind::Document.into());
+            builder.start_node(TexSyntaxKind::DOCUMENT.into());
             add_node(&mut builder, &other_node);
             builder.finish_node()
         }
@@ -96,19 +91,19 @@ pub fn ast_to_rowan(root_node: ConTeXtNode) -> GreenNode {
 fn add_node(builder: &mut GreenNodeBuilder, node: &ConTeXtNode) {
     match node {
         ConTeXtNode::Command { name, options, arguments, .. } => {
-            builder.start_node(TexSyntaxKind::Command.into());
+            builder.start_node(TexSyntaxKind::COMMAND.into());
             
-            builder.token(TexSyntaxKind::CommandName.into(), name.as_str());
+            builder.token(TexSyntaxKind::COMMANDNAME.into(), name.as_str());
             
             if !options.is_empty() {
-                builder.start_node(TexSyntaxKind::OptionGroup.into());
+                builder.start_node(TexSyntaxKind::OPTIONGROUP.into());
                 for (i, (k, v)) in options.iter().enumerate() {
                     if i > 0 {
-                        builder.token(TexSyntaxKind::Punctuation.into(), ",");
+                        builder.token(TexSyntaxKind::PUNCTUATION.into(), ",");
                     }
-                    builder.token(TexSyntaxKind::OptionKey.into(), k.as_str());
-                    builder.token(TexSyntaxKind::Punctuation.into(), "=");
-                    builder.token(TexSyntaxKind::OptionValue.into(), v.as_str());
+                    builder.token(TexSyntaxKind::OPTIONKEY.into(), k.as_str());
+                    builder.token(TexSyntaxKind::PUNCTUATION.into(), "=");
+                    builder.token(TexSyntaxKind::OPTIONVALUE.into(), v.as_str());
                 }
                 builder.finish_node();
             }
@@ -121,8 +116,8 @@ fn add_node(builder: &mut GreenNodeBuilder, node: &ConTeXtNode) {
         },
         
         ConTeXtNode::StartStop { name, content, .. } => {
-            builder.start_node(TexSyntaxKind::StartStop.into());
-            builder.token(TexSyntaxKind::EnvName.into(), name.as_str());
+            builder.start_node(TexSyntaxKind::STARTSTOP.into());
+            builder.token(TexSyntaxKind::ENVNAME.into(), name.as_str());
             
             for node in content {
                 add_node(builder, node);
@@ -132,11 +127,11 @@ fn add_node(builder: &mut GreenNodeBuilder, node: &ConTeXtNode) {
         },
         
         ConTeXtNode::Text { content, .. } => {
-            builder.token(TexSyntaxKind::Text.into(), content.as_str());
+            builder.token(TexSyntaxKind::TEXT.into(), content.as_str());
         },
         
         ConTeXtNode::Comment { content, .. } => {
-            builder.token(TexSyntaxKind::Comment.into(), content.as_str());
+            builder.token(TexSyntaxKind::COMMENT.into(), content.as_str());
         },
         
         ConTeXtNode::Document { .. } => {
