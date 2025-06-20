@@ -1,5 +1,4 @@
 pub mod parser;
-pub mod syntax;
 pub mod highlight;
 pub mod ast;
 pub mod runtime;
