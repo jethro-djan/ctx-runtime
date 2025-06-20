@@ -87,14 +87,14 @@ jobs:
 
       - name: Create XCFramework
         run: |
-          mkdir -p xcframework/includes
-          cp build/swift/Headers/*.h xcframework/includes/
-          cp build/swift/Modules/module.modulemap xcframework/includes/
+          mkdir -p xcframework/Headers
+          cp build/swift/Headers/*.h xcframework/Headers/
+          cp build/swift/Modules/module.modulemap xcframework/Headers/
           xcodebuild -create-xcframework \
             -library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
-            -headers xcframework/includes \
+            -headers xcframework/Headers \
             -library target/universal-ios-sim/release/${{ env.LIB_NAME }} \
-            -headers xcframework/includes \
+            -headers xcframework/Headers \
             -output ${{ env.FRAMEWORK_NAME }}.xcframework
           zip -r ${{ env.FRAMEWORK_NAME }}.xcframework.zip ${{ env.FRAMEWORK_NAME }}.xcframework
 
