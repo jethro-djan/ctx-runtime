@@ -19,7 +19,7 @@ on:
 
 env:
   FRAMEWORK_NAME: "ContextRuntime"
-  SPM_REPO: "jethro-djan/ContextRuntime-SP"  # CHANGE THIS
+  SPM_REPO: "jethro-djan/ContextRuntime-SP" 
 
 permissions:
   contents: write
@@ -78,15 +78,17 @@ jobs:
 
       - name: Generate UniFFI bindings
         run: |
-          cargo run --bin uniffi-bindgen generate \
-            --library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
-            --language swift \
-            --out-dir out
+          cargo run --bin uniffi-bindgen-swift -- \
+            --headers target/aarch64-apple-ios/release/${{ env.LIB_NAME }} build/swift/Headers
+          cargo run --bin uniffi-bindgen-swift -- \
+            --modulemap target/aarch64-apple-ios/release/${{ env.LIB_NAME }} build/swift/Modules \
+            --xcframework \
+            --modulemap-filename module.modulemap
 
       - name: Create XCFramework
         run: |
           mkdir -p xcframework/Headers
-          cp out/*.h xcframework/Headers/
+          cp build/swift/Headers/*.h xcframework/Headers/
           xcodebuild -create-xcframework \
             -library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
             -headers xcframework/Headers \
@@ -181,6 +183,13 @@ jobs:
             --repo "${{ env.SPM_REPO }}"
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Clean up artifacts in main repo
+        if: steps.setup.outputs.TEST_MODE == 'false'
+        run: |
+          # Remove the zip file but keep Package.swift
+          rm -f ${{ env.FRAMEWORK_NAME }}.xcframework.zip
+          rm -rf ${{ env.FRAMEWORK_NAME }}.xcframework
 
       - name: Verify release 
         if: steps.setup.outputs.TEST_MODE == 'false'
