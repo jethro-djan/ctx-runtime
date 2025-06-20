@@ -18,7 +18,7 @@ on:
         type: string
 
 env:
-  FRAMEWORK_NAME: "ContextRuntime"
+  FRAMEWORK_NAME: "ContextFFI"
   SPM_REPO: "jethro-djan/ContextRuntime-SP" 
 
 permissions:
