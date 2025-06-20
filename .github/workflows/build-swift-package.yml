@@ -87,13 +87,14 @@ jobs:
 
       - name: Create XCFramework
         run: |
-          mkdir -p xcframework/Headers
-          cp build/swift/Headers/*.h xcframework/Headers/
+          mkdir -p xcframework/includes
+          cp build/swift/Headers/*.h xcframework/includes/
+          cp build/swift/Modules/module.modulemap xcframework/includes/
           xcodebuild -create-xcframework \
             -library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
-            -headers xcframework/Headers \
+            -headers xcframework/includes \
             -library target/universal-ios-sim/release/${{ env.LIB_NAME }} \
-            -headers xcframework/Headers \
+            -headers xcframework/includes \
             -output ${{ env.FRAMEWORK_NAME }}.xcframework
           zip -r ${{ env.FRAMEWORK_NAME }}.xcframework.zip ${{ env.FRAMEWORK_NAME }}.xcframework
 
@@ -187,10 +188,19 @@ jobs:
       - name: Clean up artifacts in main repo
         if: steps.setup.outputs.TEST_MODE == 'false'
         run: |
-          # Remove the zip file but keep Package.swift
-          rm -f ${{ env.FRAMEWORK_NAME }}.xcframework.zip
-          rm -rf ${{ env.FRAMEWORK_NAME }}.xcframework
-
+          # Keep only the Package.swift file
+          git reset --hard
+          git clean -fd
+          git checkout -- Package.swift
+          
+          # Optional: Commit the Package.swift if it changed
+          git add Package.swift
+          if ! git diff-index --quiet HEAD --; then
+            git config --global user.name "GitHub Actions"
+            git config --global user.email "actions@github.com"
+            git commit -m "Update Package.swift for ${{ steps.setup.outputs.VERSION }}"
+            git push origin main
+          fi
       - name: Verify release 
         if: steps.setup.outputs.TEST_MODE == 'false'
         run: |
