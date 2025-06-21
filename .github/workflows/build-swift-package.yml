@@ -119,21 +119,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Clean main repo artifacts
+      - name: Create GitHub release
         run: |
-          # Keep only the Package.swift and Sources
-          git reset --hard
-          git clean -fd
-          git checkout -- Package.swift Sources/
+          # First verify the file exists
+          echo "Current directory: $(pwd)"
+          echo "Files in parent directory:"
+          ls -la ../
           
-          # Optional: Commit if anything changed
-          git add Package.swift Sources/
-          if ! git diff-index --quiet HEAD --; then
-            git config --global user.name "GitHub Actions"
-            git config --global user.email "actions@github.com"
-            git commit -m "Clean up after release ${{ steps.setup.outputs.VERSION }}"
-            git push origin main
-          fi
+          # Create release with absolute path
+          gh release create "${{ steps.setup.outputs.VERSION }}" \
+            "${{ github.workspace }}/${{ env.XCFRAMEWORK_NAME }}.xcframework.zip" \
+            --title "${{ env.PACKAGE_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --notes "Automated release" \
+            --repo "${{ env.SPM_REPO }}"
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Verify release
         run: |
@@ -144,22 +144,3 @@ jobs:
           echo "📋 Checksum: ${{ steps.package.outputs.CHECKSUM }}"
 
 
-      - name: Clean build artifacts from main repo
-        run: |
-          # Remove ONLY build artifacts
-          rm -rf target/  # Rust build artifacts
-          rm -rf ContextRuntime/  # cargo-swift output directory
-          rm -f *.xcframework.zip  # Zipped framework if any
-          
-          # Verify what's being kept (for debugging)
-          echo "Remaining files in main repo:"
-          ls -la
-          
-          # Optional: Commit the cleanup if you want
-          git add -u
-          if ! git diff-index --quiet HEAD --; then
-            git config --global user.name "GitHub Actions"
-            git config --global user.email "actions@github.com"
-            git commit -m "Clean build artifacts after release"
-            git push origin main
-          fi
