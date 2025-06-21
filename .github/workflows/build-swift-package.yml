@@ -13,9 +13,9 @@ on:
         type: string
 
 env:
-  SWIFT_PACKAGE_NAME: "ContextRuntime"
+  PACKAGE_NAME: "ContextRuntime"
+  XCFRAMEWORK_NAME: "ContextFFI"
   SPM_REPO: "jethro-djan/ContextRuntime-SP"
-  XCFRAMEWORK_NAME: "ContextRuntimeFFI"
 
 permissions:
   contents: write
@@ -35,24 +35,33 @@ jobs:
           else
             echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           fi
+          echo "PACKAGE_NAME=${{ env.PACKAGE_NAME }}" >> $GITHUB_ENV
+          echo "XCFRAMEWORK_NAME=${{ env.XCFRAMEWORK_NAME }}" >> $GITHUB_ENV
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-swift
-        run: cargo install cargo-swift
+        run: |
+          # Install non-interactively by setting CARGO_TERM_COLOR=never
+          CARGO_TERM_COLOR=never cargo install cargo-swift
 
-      - name: Build Swift package with cargo-swift
+      - name: Install required targets
+        run: |
+          rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
+
+      - name: Build package with cargo-swift
         run: |
           cargo swift package \
-            --name ${{ env.SWIFT_PACKAGE_NAME }} \
+            --name ${{ env.PACKAGE_NAME }} \
             --xcframework-name ${{ env.XCFRAMEWORK_NAME }} \
             --platforms ios \
-            --release
+            --release \
+            --silent
 
       - name: Zip XCFramework
         run: |
-          cd ${{ env.SWIFT_PACKAGE_NAME }}
+          cd ${{ env.PACKAGE_NAME }}
           zip -r ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip ${{ env.XCFRAMEWORK_NAME }}.xcframework
 
       - name: Checkout SPM repo
@@ -62,24 +71,26 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           path: spm-repo
 
-      - name: Prepare SPM release
+      - name: Prepare SPM repo (Full cleanup)
         id: package
         run: |
           cd spm-repo
           
-          # Clean existing content (except .git)
+          # COMPLETE cleanup except .git
           find . -path ./.git -prune -o -exec rm -rf {} + 2>/dev/null || true
           
-          # Copy Swift package sources and manifest
-          cp -R ../${{ env.SWIFT_PACKAGE_NAME }}/Sources .
-          cp ../${{ env.SWIFT_PACKAGE_NAME }}/Package.swift .
+          # Copy ONLY the essential files
+          mkdir -p Sources/${{ env.PACKAGE_NAME }}
+          cp -R ../${{ env.PACKAGE_NAME }}/Sources/${{ env.PACKAGE_NAME }}/* Sources/${{ env.PACKAGE_NAME }}/
+          cp ../${{ env.PACKAGE_NAME }}/Package.swift .
           
-          # Calculate checksum for the XCFramework zip
+          # Ensure no XCFramework files remain
+          rm -rf *.xcframework || true
+          
           CHECKSUM=$(swift package compute-checksum ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip)
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
           
-          # Update Package.swift to reference the remote XCFramework
-          sed -i '' -e "s|\.binaryTarget(name: \".*\", path: \".*\"|.binaryTarget(name: \"${{ env.XCFRAMEWORK_NAME }}\", url: \"https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.XCFRAMEWORK_NAME }}.xcframework.zip\", checksum: \"$CHECKSUM\"|" Package.swift
+          sed -i '' -e "s|path: \"./${{ env.XCFRAMEWORK_NAME }}.xcframework\"|url: \"https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.XCFRAMEWORK_NAME }}.xcframework.zip\", checksum: \"$CHECKSUM\"|" Package.swift
 
       - name: Commit and push to SPM repo
         run: |
@@ -92,21 +103,57 @@ jobs:
           git push origin main
           git push origin ${{ steps.setup.outputs.VERSION }}
 
-      - name: Create GitHub release with XCFramework
+      - name: Create GitHub release
         run: |
           gh release create "${{ steps.setup.outputs.VERSION }}" \
             ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip \
-            --title "${{ env.SWIFT_PACKAGE_NAME }} ${{ steps.setup.outputs.VERSION }}" \
-            --notes "Automated release of ${{ env.SWIFT_PACKAGE_NAME }} Swift package with ${{ env.XCFRAMEWORK_NAME }} XCFramework" \
+            --title "${{ env.PACKAGE_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --notes "Automated release" \
             --repo "${{ env.SPM_REPO }}"
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
+      - name: Clean main repo artifacts
+        run: |
+          # Keep only the Package.swift and Sources
+          git reset --hard
+          git clean -fd
+          git checkout -- Package.swift Sources/
+          
+          # Optional: Commit if anything changed
+          git add Package.swift Sources/
+          if ! git diff-index --quiet HEAD --; then
+            git config --global user.name "GitHub Actions"
+            git config --global user.email "actions@github.com"
+            git commit -m "Clean up after release ${{ steps.setup.outputs.VERSION }}"
+            git push origin main
+          fi
+
       - name: Verify release
         run: |
           echo "✅ Release created successfully!"
-          echo "📦 Swift Package: ${{ env.SWIFT_PACKAGE_NAME }}"
-          echo "🔧 XCFramework: ${{ env.XCFRAMEWORK_NAME }}"
+          echo "📦 Package: ${{ env.PACKAGE_NAME }}"
           echo "🏷️  Version: ${{ steps.setup.outputs.VERSION }}"
           echo "🔗 Repository: https://github.com/${{ env.SPM_REPO }}"
           echo "📋 Checksum: ${{ steps.package.outputs.CHECKSUM }}"
+
+
+      - name: Clean build artifacts from main repo
+        run: |
+          # Remove ONLY build artifacts
+          rm -rf target/  # Rust build artifacts
+          rm -rf ContextRuntime/  # cargo-swift output directory
+          rm -f *.xcframework.zip  # Zipped framework if any
+          
+          # Verify what's being kept (for debugging)
+          echo "Remaining files in main repo:"
+          ls -la
+          
+          # Optional: Commit the cleanup if you want
+          git add -u
+          if ! git diff-index --quiet HEAD --; then
+            git config --global user.name "GitHub Actions"
+            git config --global user.email "actions@github.com"
+            git commit -m "Clean build artifacts after release"
+            git push origin main
+          fi
