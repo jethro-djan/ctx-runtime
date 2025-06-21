@@ -11,7 +11,8 @@ use crate::ffi::{
     ContextRuntimeHandle,
 };
 
-uniffi::include_scaffolding!("context");
+uniffi::setup_scaffolding!();
+// uniffi::include_scaffolding!("context");
 
 #[cfg(test)]
 mod tests {

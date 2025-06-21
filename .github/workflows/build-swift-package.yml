@@ -6,11 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      test_mode:
-        description: 'Run in test mode'
-        required: false
-        default: false
-        type: boolean
       version_tag:
         description: 'Version tag (e.g., v1.0.0)'
         required: false
@@ -18,8 +13,9 @@ on:
         type: string
 
 env:
-  FRAMEWORK_NAME: "ContextFFI"
-  SPM_REPO: "jethro-djan/ContextRuntime-SP" 
+  SWIFT_PACKAGE_NAME: "ContextRuntime"
+  SPM_REPO: "jethro-djan/ContextRuntime-SP"
+  XCFRAMEWORK_NAME: "ContextRuntimeFFI"
 
 permissions:
   contents: write
@@ -36,176 +32,81 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "VERSION=${{ inputs.version_tag }}" >> $GITHUB_OUTPUT
-            echo "TEST_MODE=${{ inputs.test_mode }}" >> $GITHUB_OUTPUT
           else
             echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-            echo "TEST_MODE=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust targets
-        run: |
-          rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
+      - name: Install cargo-swift
+        run: cargo install cargo-swift
 
-      - name: Build Rust libraries
+      - name: Build Swift package with cargo-swift
         run: |
-          # Clean previous builds
-          cargo clean
-          
-          # Build with explicit library output
-          cargo build --lib --release --target aarch64-apple-ios
-          cargo build --lib --release --target x86_64-apple-ios
-          cargo build --lib --release --target aarch64-apple-ios-sim
-          
-          # Debug: Find the actual library name
-          echo "Built libraries:"
-          find target -name "*.a" -exec ls -la {} \;
-          
-          # Get the first static library found (should match your crate name)
-          LIB_PATH=$(find target -name "*.a" | grep release | head -1)
-          LIB_NAME=$(basename $LIB_PATH)
-          echo "Detected library name: $LIB_NAME"
-          echo "LIB_NAME=$LIB_NAME" >> $GITHUB_ENV
-          
-          # Create universal lib using detected name
-          mkdir -p target/universal-ios-sim/release
-          lipo -create \
-            "target/x86_64-apple-ios/release/$LIB_NAME" \
-            "target/aarch64-apple-ios-sim/release/$LIB_NAME" \
-            -output "target/universal-ios-sim/release/$LIB_NAME"
+          cargo swift package \
+            --name ${{ env.SWIFT_PACKAGE_NAME }} \
+            --xcframework-name ${{ env.XCFRAMEWORK_NAME }} \
+            --platforms ios \
+            --release
 
-      - name: Generate UniFFI bindings
+      - name: Zip XCFramework
         run: |
-          cargo run --bin uniffi-bindgen-swift -- \
-            --headers target/aarch64-apple-ios/release/${{ env.LIB_NAME }} build/swift/Headers
-          cargo run --bin uniffi-bindgen-swift -- \
-            --modulemap target/aarch64-apple-ios/release/${{ env.LIB_NAME }} build/swift/Modules \
-            --xcframework \
-            --modulemap-filename module.modulemap
-
-      - name: Create XCFramework
-        run: |
-          mkdir -p xcframework/Headers
-          cp build/swift/Headers/*.h xcframework/Headers/
-          cp build/swift/Modules/module.modulemap xcframework/Headers/
-          xcodebuild -create-xcframework \
-            -library target/aarch64-apple-ios/release/${{ env.LIB_NAME }} \
-            -headers xcframework/Headers \
-            -library target/universal-ios-sim/release/${{ env.LIB_NAME }} \
-            -headers xcframework/Headers \
-            -output ${{ env.FRAMEWORK_NAME }}.xcframework
-          zip -r ${{ env.FRAMEWORK_NAME }}.xcframework.zip ${{ env.FRAMEWORK_NAME }}.xcframework
+          cd ${{ env.SWIFT_PACKAGE_NAME }}
+          zip -r ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip ${{ env.XCFRAMEWORK_NAME }}.xcframework
 
       - name: Checkout SPM repo
-        if: steps.setup.outputs.TEST_MODE == 'false'
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SPM_REPO }}
           token: ${{ secrets.GH_TOKEN }}
           path: spm-repo
 
-      - name: Calculate checksum and generate Package.swift
+      - name: Prepare SPM release
         id: package
-        run: |
-          CHECKSUM=$(swift package compute-checksum ${{ env.FRAMEWORK_NAME }}.xcframework.zip)
-          echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
-          echo "Checksum: $CHECKSUM"
-          
-          # Generate Package.swift with SPM repo URL
-          cat > Package.swift <<EOF
-          // swift-tools-version:5.9
-          import PackageDescription
-          
-          let package = Package(
-              name: "${{ env.FRAMEWORK_NAME }}",
-              platforms: [.iOS(.v16)],
-              products: [.library(name: "${{ env.FRAMEWORK_NAME }}", targets: ["${{ env.FRAMEWORK_NAME }}"])],
-              targets: [
-                  .binaryTarget(
-                      name: "${{ env.FRAMEWORK_NAME }}",
-                      url: "https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.FRAMEWORK_NAME }}.xcframework.zip",
-                      checksum: "$CHECKSUM"
-                  )
-              ]
-          )
-          EOF
-
-      - name: Simulate release (test mode)
-        if: steps.setup.outputs.TEST_MODE == 'true'
-        run: |
-          echo "🧪 TEST MODE - Would perform the following actions:"
-          echo "1. Update SPM repo: ${{ env.SPM_REPO }}"
-          echo "2. Version: ${{ steps.setup.outputs.VERSION }}"
-          echo "3. Checksum: ${{ steps.package.outputs.CHECKSUM }}"
-          echo "4. XCFramework size: $(ls -lh ${{ env.FRAMEWORK_NAME }}.xcframework.zip | awk '{print $5}')"
-          echo "5. Package.swift content:"
-          cat Package.swift
-          echo ""
-          echo "✅ Test completed successfully!"
-
-      - name: Update SPM repo and create release
-        if: steps.setup.outputs.TEST_MODE == 'false'
         run: |
           cd spm-repo
           
-          # Completely reset the repository
-          rm -rf * .swiftpm .gitignore
-          git clean -fdx
+          # Clean existing content (except .git)
+          find . -path ./.git -prune -o -exec rm -rf {} + 2>/dev/null || true
           
-          # Initialize fresh empty package
-          swift package init --type empty --name ${{ env.FRAMEWORK_NAME }}
+          # Copy Swift package sources and manifest
+          cp -R ../${{ env.SWIFT_PACKAGE_NAME }}/Sources .
+          cp ../${{ env.SWIFT_PACKAGE_NAME }}/Package.swift .
           
-          # Remove auto-generated files we don't need
-          rm -rf Package.resolved
+          # Calculate checksum for the XCFramework zip
+          CHECKSUM=$(swift package compute-checksum ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip)
+          echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
           
-          # Copy our generated files
-          cp ../Package.swift .
-          cp ../${{ env.FRAMEWORK_NAME }}.xcframework.zip .
-          
-          # Configure Git
+          # Update Package.swift to reference the remote XCFramework
+          sed -i '' -e "s|\.binaryTarget(name: \".*\", path: \".*\"|.binaryTarget(name: \"${{ env.XCFRAMEWORK_NAME }}\", url: \"https://github.com/${{ env.SPM_REPO }}/releases/download/${{ steps.setup.outputs.VERSION }}/${{ env.XCFRAMEWORK_NAME }}.xcframework.zip\", checksum: \"$CHECKSUM\"|" Package.swift
+
+      - name: Commit and push to SPM repo
+        run: |
+          cd spm-repo
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          # Add and commit everything
           git add --all
-          git commit -m "Release ${{ steps.setup.outputs.VERSION }}" --allow-empty
-          
-          # Force push (handles both new and existing tags)
-          git tag -f ${{ steps.setup.outputs.VERSION }}
-          git push -f origin main --tags
-          
-          # Create/update release
+          git commit -m "Release ${{ steps.setup.outputs.VERSION }}"
+          git tag ${{ steps.setup.outputs.VERSION }}
+          git push origin main
+          git push origin ${{ steps.setup.outputs.VERSION }}
+
+      - name: Create GitHub release with XCFramework
+        run: |
           gh release create "${{ steps.setup.outputs.VERSION }}" \
-            "${{ env.FRAMEWORK_NAME }}.xcframework.zip" \
-            --title "${{ env.FRAMEWORK_NAME }} ${{ steps.setup.outputs.VERSION }}" \
-            --notes "Automated release" \
+            ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip \
+            --title "${{ env.SWIFT_PACKAGE_NAME }} ${{ steps.setup.outputs.VERSION }}" \
+            --notes "Automated release of ${{ env.SWIFT_PACKAGE_NAME }} Swift package with ${{ env.XCFRAMEWORK_NAME }} XCFramework" \
             --repo "${{ env.SPM_REPO }}"
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Clean up artifacts in main repo
-        if: steps.setup.outputs.TEST_MODE == 'false'
-        run: |
-          # Keep only the Package.swift file
-          git reset --hard
-          git clean -fd
-          git checkout -- Package.swift
-          
-          # Optional: Commit the Package.swift if it changed
-          git add Package.swift
-          if ! git diff-index --quiet HEAD --; then
-            git config --global user.name "GitHub Actions"
-            git config --global user.email "actions@github.com"
-            git commit -m "Update Package.swift for ${{ steps.setup.outputs.VERSION }}"
-            git push origin main
-          fi
-      - name: Verify release 
-        if: steps.setup.outputs.TEST_MODE == 'false'
+      - name: Verify release
         run: |
           echo "✅ Release created successfully!"
-          echo "📦 Package: ${{ env.FRAMEWORK_NAME }}"
+          echo "📦 Swift Package: ${{ env.SWIFT_PACKAGE_NAME }}"
+          echo "🔧 XCFramework: ${{ env.XCFRAMEWORK_NAME }}"
           echo "🏷️  Version: ${{ steps.setup.outputs.VERSION }}"
           echo "🔗 Repository: https://github.com/${{ env.SPM_REPO }}"
           echo "📋 Checksum: ${{ steps.package.outputs.CHECKSUM }}"

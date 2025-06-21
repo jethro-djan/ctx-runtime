@@ -6,11 +6,14 @@ use crate::{
     diagnostic::Diagnostic,
 };
 
+#[derive(uniffi::Object)]
 pub struct ContextRuntimeHandle {
     inner: Mutex<Runtime>,
 }
 
+#[uniffi::export]
 impl ContextRuntimeHandle {
+    #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Runtime::new()), 
@@ -59,7 +62,7 @@ impl ContextRuntimeHandle {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct CompileResultFfi {
     pub success: bool,
     pub pdf_path: Option<String>,
@@ -84,52 +87,6 @@ impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
                 }],
                 warnings: vec![],
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct HighlightFfi {
-    pub range: FfiRange,
-    pub kind: String, 
-}
-
-#[derive(Debug, Clone)]
-pub struct DiagnosticFfi {
-    pub range: FfiRange,
-    pub severity: String,
-    pub message: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct FfiRange {
-    pub start: u32,
-    pub end: u32,
-}
-
-impl From<Highlight> for HighlightFfi {
-    fn from(h: Highlight) -> Self {
-        HighlightFfi {
-            range: FfiRange {
-                start: h.range.start as u32,
-                end: h.range.end as u32,
-            },
-            kind: h.kind.to_string(),
-        }
-    }
-}
-
-impl From<Diagnostic> for DiagnosticFfi {
-    fn from(d: Diagnostic) -> Self {
-        DiagnosticFfi {
-            range: FfiRange {
-                start: d.span.start_byte.unwrap_or(0) as u32,
-                end: d.span.end_byte.unwrap_or(0) as u32,
-            },
-            severity: d.severity.to_string(),
-            message: d.message,
-            source: d.source,
         }
     }
 }
@@ -161,3 +118,52 @@ impl From<CompilationResult> for CompileResultFfi {
         }
     }
 }
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HighlightFfi {
+    pub range: FfiRange,
+    pub kind: String, 
+}
+
+impl From<Highlight> for HighlightFfi {
+    fn from(h: Highlight) -> Self {
+        HighlightFfi {
+            range: FfiRange {
+                start: h.range.start as u32,
+                end: h.range.end as u32,
+            },
+            kind: h.kind.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DiagnosticFfi {
+    pub range: FfiRange,
+    pub severity: String,
+    pub message: String,
+    pub source: String,
+}
+
+impl From<Diagnostic> for DiagnosticFfi {
+    fn from(d: Diagnostic) -> Self {
+        DiagnosticFfi {
+            range: FfiRange {
+                start: d.span.start_byte.unwrap_or(0) as u32,
+                end: d.span.end_byte.unwrap_or(0) as u32,
+            },
+            severity: d.severity.to_string(),
+            message: d.message,
+            source: d.source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+
+
