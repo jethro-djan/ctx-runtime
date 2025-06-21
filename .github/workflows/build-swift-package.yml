@@ -105,8 +105,14 @@ jobs:
 
       - name: Create GitHub release
         run: |
+          # First verify the file exists
+          echo "Current directory: $(pwd)"
+          echo "Files in parent directory:"
+          ls -la ../
+          
+          # Create release with absolute path
           gh release create "${{ steps.setup.outputs.VERSION }}" \
-            ../${{ env.XCFRAMEWORK_NAME }}.xcframework.zip \
+            "${{ github.workspace }}/${{ env.XCFRAMEWORK_NAME }}.xcframework.zip" \
             --title "${{ env.PACKAGE_NAME }} ${{ steps.setup.outputs.VERSION }}" \
             --notes "Automated release" \
             --repo "${{ env.SPM_REPO }}"
