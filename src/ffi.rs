@@ -1,10 +1,10 @@
-use std::sync::Mutex;
-
 use crate::{
     runtime::{Runtime, CompilationResult, RuntimeError},
     highlight::{Highlight, HighlightKind},
     diagnostic::Diagnostic,
 };
+
+use std::sync::Mutex;
 
 #[derive(uniffi::Object)]
 pub struct ContextRuntimeHandle {
@@ -15,50 +15,52 @@ pub struct ContextRuntimeHandle {
 impl ContextRuntimeHandle {
     #[uniffi::constructor]
     pub fn new() -> Self {
+        let runtime = Runtime::new().unwrap_or_else(|e| {
+            log::error!("Failed to create Runtime: {}", e);
+            panic!("Failed to create Runtime: {}", e);
+        });
+        
         Self {
-            inner: Mutex::new(Runtime::new()), 
+            inner: Mutex::new(runtime),
         }
     }
 
     pub fn open(&self, uri: String, text: String) -> bool {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.open_document(uri, text).is_ok()
+        self.inner.lock().unwrap().open_document(uri, text).is_ok()
     }
 
     pub fn update(&self, uri: String, text: String) -> bool {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.open_document(uri, text).is_ok()
+        self.inner.lock().unwrap().open_document(uri, text).is_ok()
     }
 
     pub fn close(&self, uri: String) {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.close_document(&uri);
+        self.inner.lock().unwrap().close_document(&uri);
     }
 
     pub fn get_document_source(&self, uri: String) -> Option<String> {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.get_document_source(&uri).map(|s| s.to_string())
+        self.inner.lock().unwrap().get_document_source(&uri)
     }
 
     pub fn get_highlights(&self, uri: String) -> Vec<HighlightFfi> {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.get_highlights(&uri)
+        self.inner.lock().unwrap()
+            .get_highlights(&uri)
             .into_iter()
             .map(Into::into)
             .collect()
     }
 
     pub fn get_diagnostics(&self, uri: String) -> Vec<DiagnosticFfi> {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.get_diagnostics(&uri)
+        self.inner.lock().unwrap()
+            .get_diagnostics(&uri)
             .into_iter()
             .map(Into::into)
             .collect()
     }
 
     pub fn compile(&self, uri: String) -> CompileResultFfi {
-        let runtime = self.inner.lock().unwrap(); 
-        runtime.compile_document(&uri).into()
+        self.inner.lock().unwrap()
+            .compile_document(&uri)
+            .into()
     }
 }
 
