@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::io::Write;
 use crate::highlight::{Highlight, highlight};
 use crate::diagnostic::Diagnostic;
 
@@ -186,8 +188,6 @@ impl Runtime {
     }
 
     fn create_temp_file(&self, uri: &str, content: &str) -> Result<PathBuf, RuntimeError> {
-        use std::io::Write;
-        
         let temp_dir = std::env::temp_dir();
         let file_name = format!("context_temp_{}.tex", 
             uri.replace(['/', '\\', ':'], "_"));
@@ -206,8 +206,10 @@ impl Runtime {
             .cloned()
             .unwrap_or_default();
         
+        // Remove old compiler diagnostics
         diagnostics.retain(|d| d.source != "compiler");
         
+        // Add new compilation errors
         for error in &result.errors {
             diagnostics.push(Diagnostic::error(
                 error.line,
@@ -218,6 +220,7 @@ impl Runtime {
             ));
         }
         
+        // Add new compilation warnings
         for warning in &result.warnings {
             diagnostics.push(Diagnostic::warning(
                 warning.line,
@@ -230,6 +233,26 @@ impl Runtime {
         
         self.diagnostics.borrow_mut().insert(uri.to_string(), diagnostics);
     }
+
+    // NEW: Method to set custom context executable path
+    pub fn set_context_executable(&mut self, path: PathBuf) {
+        self.compiler.executable = path;
+    }
+
+    // NEW: Method to set working directory
+    pub fn set_working_directory(&mut self, path: PathBuf) {
+        self.compiler.working_dir = path;
+    }
+
+    // NEW: Method to check if context executable exists
+    pub fn context_executable_exists(&self) -> bool {
+        self.compiler.executable_exists()
+    }
+
+    // NEW: Method to get current executable path
+    pub fn get_context_executable(&self) -> &PathBuf {
+        &self.compiler.executable
+    }
 }
 
 impl ConTeXtCompiler {
@@ -240,26 +263,91 @@ impl ConTeXtCompiler {
         }
     }
 
+    pub fn new_with_executable(executable: PathBuf) -> Self {
+        ConTeXtCompiler {
+            executable,
+            working_dir: std::env::temp_dir(),
+        }
+    }
+
+    pub fn executable_exists(&self) -> bool {
+        // Check if the executable exists and is executable
+        if self.executable.is_absolute() {
+            self.executable.exists()
+        } else {
+            // For relative paths, try to find in PATH
+            self.find_in_path().is_some()
+        }
+    }
+
+    fn find_in_path(&self) -> Option<PathBuf> {
+        if let Ok(path_var) = std::env::var("PATH") {
+            for path in std::env::split_paths(&path_var) {
+                let full_path = path.join(&self.executable);
+                if full_path.exists() {
+                    return Some(full_path);
+                }
+                
+                // On Windows, also try with .exe extension
+                #[cfg(windows)]
+                {
+                    let exe_path = path.join(format!("{}.exe", self.executable.display()));
+                    if exe_path.exists() {
+                        return Some(exe_path);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn compile(&self, input_file: &Path) -> Result<CompilationResult, RuntimeError> {
-        use std::process::Command;
-        
-        let output = Command::new(&self.executable)
+        // Ensure the executable exists before attempting compilation
+        if !self.executable_exists() {
+            return Err(RuntimeError::CompilationError(
+                format!("ConTeXt executable not found: {}", self.executable.display())
+            ));
+        }
+
+        let executable_path = if self.executable.is_absolute() {
+            self.executable.clone()
+        } else {
+            self.find_in_path().unwrap_or_else(|| self.executable.clone())
+        };
+
+        let output = Command::new(&executable_path)
             .arg("--batchmode")
             .arg("--nonstopmode")
+            .arg("--purgeall") // Clean up auxiliary files
             .arg(input_file)
             .current_dir(&self.working_dir)
             .output()
-            .map_err(|e| RuntimeError::CompilationError(format!("Failed to execute ConTeXt: {}", e)))?;
+            .map_err(|e| RuntimeError::CompilationError(
+                format!("Failed to execute ConTeXt ({}): {}", executable_path.display(), e)
+            ))?;
 
         let log = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let success = output.status.success();
         
-        let (errors, warnings) = self.parse_log(&log);
+        // Combine stdout and stderr for comprehensive log
+        let full_log = if stderr.is_empty() {
+            log
+        } else {
+            format!("{}\n--- stderr ---\n{}", log, stderr)
+        };
+        
+        let (errors, warnings) = self.parse_log(&full_log);
         
         let output_path = if success {
             let mut path = input_file.to_path_buf();
             path.set_extension("pdf");
-            Some(path)
+            // Only return the path if the PDF actually exists
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -269,7 +357,7 @@ impl ConTeXtCompiler {
             output_path,
             errors,
             warnings,
-            log,
+            log: full_log,
         })
     }
 
@@ -277,18 +365,34 @@ impl ConTeXtCompiler {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         
-        for line in log.lines() {
-            if line.contains("! ") {
+        // ConTeXt log parsing - this is a simplified version
+        // You may need to enhance this based on actual ConTeXt log format
+        for (line_num, line) in log.lines().enumerate() {
+            let line = line.trim();
+            
+            // Error patterns
+            if line.starts_with("! ") || line.contains("error") {
                 errors.push(CompilationError {
-                    file: String::new(),
-                    line: 0,
+                    file: String::new(), // ConTeXt logs don't always clearly indicate file
+                    line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
                     column: 0,
                     message: line.to_string(),
                 });
-            } else if line.contains("Warning:") {
+            }
+            // Warning patterns
+            else if line.contains("warning") || line.contains("Warning") {
                 warnings.push(CompilationWarning {
                     file: String::new(),
-                    line: 0,
+                    line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
+                    column: 0,
+                    message: line.to_string(),
+                });
+            }
+            // TeX error patterns
+            else if line.starts_with("tex error") {
+                errors.push(CompilationError {
+                    file: String::new(),
+                    line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
                     column: 0,
                     message: line.to_string(),
                 });
@@ -296,6 +400,94 @@ impl ConTeXtCompiler {
         }
         
         (errors, warnings)
+    }
+
+    fn extract_line_number(&self, line: &str) -> Option<u32> {
+        // Try to extract line numbers from various ConTeXt error formats
+        // This is a simplified implementation - you may need to enhance this
+        
+        // Look for patterns like "line 42" or "l.42"
+        if let Some(pos) = line.find("line ") {
+            let after_line = &line[pos + 5..];
+            if let Some(space_pos) = after_line.find(' ') {
+                if let Ok(num) = after_line[..space_pos].parse::<u32>() {
+                    return Some(num);
+                }
+            }
+        }
+        
+        if let Some(pos) = line.find("l.") {
+            let after_l = &line[pos + 2..];
+            let mut end_pos = 0;
+            for (i, c) in after_l.char_indices() {
+                if !c.is_ascii_digit() {
+                    end_pos = i;
+                    break;
+                }
+            }
+            if end_pos > 0 {
+                if let Ok(num) = after_l[..end_pos].parse::<u32>() {
+                    return Some(num);
+                }
+            }
+        }
+        
+        None
+    }
+
+    // NEW: Method to test if compilation works
+    pub fn test_compilation(&self) -> Result<bool, RuntimeError> {
+        // Create a minimal test document
+        let test_content = r#"\starttext
+Hello, ConTeXt!
+\stoptext"#;
+        
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("context_test.tex");
+        
+        // Write test file
+        std::fs::write(&test_file, test_content)?;
+        
+        // Try to compile
+        let result = self.compile(&test_file);
+        
+        // Clean up
+        let _ = std::fs::remove_file(&test_file);
+        if let Ok(ref comp_result) = result {
+            if let Some(ref pdf_path) = comp_result.output_path {
+                let _ = std::fs::remove_file(pdf_path);
+            }
+        }
+        
+        match result {
+            Ok(comp_result) => Ok(comp_result.success),
+            Err(_) => Ok(false),
+        }
+    }
+
+    // NEW: Get version information
+    pub fn get_version(&self) -> Result<String, RuntimeError> {
+        if !self.executable_exists() {
+            return Err(RuntimeError::CompilationError(
+                format!("ConTeXt executable not found: {}", self.executable.display())
+            ));
+        }
+
+        let executable_path = if self.executable.is_absolute() {
+            self.executable.clone()
+        } else {
+            self.find_in_path().unwrap_or_else(|| self.executable.clone())
+        };
+
+        let output = Command::new(&executable_path)
+            .arg("--version")
+            .output()
+            .map_err(|e| RuntimeError::CompilationError(
+                format!("Failed to get ConTeXt version: {}", e)
+            ))?;
+
+        let version_info = String::from_utf8_lossy(&output.stdout);
+        Ok(version_info.trim().to_string())
     }
 }
 
@@ -309,4 +501,16 @@ pub enum RuntimeError {
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for ConTeXtCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
