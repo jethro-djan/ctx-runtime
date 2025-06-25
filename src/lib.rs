@@ -5,13 +5,7 @@ pub mod runtime;
 pub mod ffi;
 pub mod diagnostic;
 
-use tempfile;
 
-use crate::highlight::HighlightKind;
-use crate::ffi::{
-    HighlightFfi, FfiRange, CompileResultFfi, DiagnosticFfi,
-    ContextRuntimeHandle,
-};
 
 uniffi::setup_scaffolding!();
 // uniffi::include_scaffolding!("context");

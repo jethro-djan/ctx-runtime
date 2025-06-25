@@ -40,7 +40,7 @@ pub fn highlight(node: &ConTeXtNode) -> Vec<Highlight> {
 /// Highlight AST nodes directly
 fn highlight_node(node: &ConTeXtNode, highlights: &mut Vec<Highlight>) {
     match node {
-        ConTeXtNode::Command { name, options, arguments, span, .. } => {
+        ConTeXtNode::Command {   arguments, span, .. } => {
             highlights.push(Highlight {
                 range: span.start..span.end,
                 kind: HighlightKind::Command,

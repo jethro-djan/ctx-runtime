@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
@@ -222,7 +221,7 @@ impl ContextRuntimeHandle {
     
     pub fn open(&self, uri: String, text: String) -> bool {
         let result = {
-            let mut runtime = self.sync_runtime.lock().unwrap();
+            let runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
@@ -235,7 +234,7 @@ impl ContextRuntimeHandle {
     
     pub fn update(&self, uri: String, text: String) -> bool {
         let result = {
-            let mut runtime = self.sync_runtime.lock().unwrap();
+            let runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
@@ -245,7 +244,7 @@ impl ContextRuntimeHandle {
     }
     
     pub fn close(&self, uri: String) {
-        let mut runtime = self.sync_runtime.lock().unwrap();
+        let runtime = self.sync_runtime.lock().unwrap();
         runtime.close_document(&uri);
     }
     
