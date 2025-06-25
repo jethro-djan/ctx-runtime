@@ -1,38 +1,30 @@
-use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, RwLock};
 use std::collections::HashMap;
-use uuid::Uuid;
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::path::PathBuf;
+use tokio::sync::{mpsc, RwLock};
+use uuid::Uuid;
 
-#[uniffi::export(callback_interface)]
-pub trait CompilationCallback: Send + Sync {
-    fn on_compilation_complete(&self, result: CompileResultFfi);
-}
+use crate::runtime::{Runtime, CompilationResult, RuntimeError};
+use crate::highlight::Highlight;
+use crate::diagnostic::Diagnostic;
 
-#[uniffi::export(callback_interface)]
+#[uniffi::export(with_foreign)]
 pub trait LiveUpdateCallback: Send + Sync {
     fn on_diagnostics_updated(&self, uri: String, diagnostics: Vec<DiagnosticFfi>);
     fn on_highlights_updated(&self, uri: String, highlights: Vec<HighlightFfi>);
 }
 
-#[derive(Debug, Clone)]
-pub enum CompilationBackend {
-    Auto,                           
-    Local(Option<String>),          
-    Remote(String),                 
-    LocalWithInstall {              
-        install_path: Option<String>,
-        download_url: String,
-        fallback_remote: Option<String>,
-    }
+#[uniffi::export(with_foreign)]
+pub trait CompilationCallback: Send + Sync {
+    fn on_compilation_complete(&self, result: CompileResultFfi);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct CompilationConfig {
     pub backend: CompilationBackend,
-    pub timeout_seconds: u64,
     pub auth_token: Option<String>,
+    pub timeout_seconds: u64,
     pub auto_install: bool,
 }
 
@@ -40,23 +32,35 @@ impl Default for CompilationConfig {
     fn default() -> Self {
         Self {
             backend: CompilationBackend::Auto,
-            timeout_seconds: 30,
             auth_token: None,
-            auto_install: true,
+            timeout_seconds: 60,
+            auto_install: false,
         }
     }
 }
 
-#[derive(Clone)]
-pub struct CompilationJob {
-    pub id: String,
-    pub uri: String,
-    pub callback: Option<Arc<dyn CompilationCallback>>,
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum CompilationBackend {
+    Auto,
+    Local { path: Option<String> },
+    Remote { endpoint: String },
+    LocalWithInstall { 
+        install_path: Option<String>, 
+        download_url: String, 
+        fallback_remote: Option<String> 
+    },
 }
 
 enum BackgroundTask {
     ParseDocument { uri: String, text: String },
     CompileDocument { job: CompilationJob },
+}
+
+#[derive(Clone)]
+struct CompilationJob {
+    id: String,
+    uri: String,
+    callback: Option<Arc<dyn CompilationCallback>>,
 }
 
 #[derive(uniffi::Object)]
@@ -81,6 +85,7 @@ impl ContextRuntimeHandle {
         Self::new_with_config(CompilationConfig::default())
     }
     
+    #[uniffi::constructor]
     pub fn new_with_config(config: CompilationConfig) -> Self {
         let sync_runtime = Arc::new(Mutex::new(Runtime::new()));
         let (task_sender, mut task_receiver) = mpsc::unbounded_channel::<BackgroundTask>();
@@ -140,28 +145,43 @@ impl ContextRuntimeHandle {
         }
     }
     
-    #[cfg(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android")))]
+    #[uniffi::constructor]
     pub fn new_desktop() -> Self {
-        let config = CompilationConfig {
-            backend: CompilationBackend::LocalWithInstall {
-                install_path: None,
-                download_url: "https://releases.context.com/latest/context".to_string(),
-                fallback_remote: Some("https://api.context.com/compile".to_string()),
-            },
-            auto_install: true,
-            ..Default::default()
-        };
-        Self::new_with_config(config)
+        #[cfg(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android")))]
+        {
+            let config = CompilationConfig {
+                backend: CompilationBackend::LocalWithInstall {
+                    install_path: None,
+                    download_url: "https://releases.context.com/latest/context".to_string(),
+                    fallback_remote: Some("https://api.context.com/compile".to_string()),
+                },
+                auto_install: true,
+                ..Default::default()
+            };
+            Self::new_with_config(config)
+        }
+        #[cfg(not(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android"))))]
+        {
+            panic!("new_desktop is only available on desktop platforms with local-install feature");
+        }
     }
     
-    #[cfg(feature = "http-compilation")]
+    #[uniffi::constructor]
     pub fn new_mobile(api_endpoint: String) -> Self {
-        let config = CompilationConfig {
-            backend: CompilationBackend::Remote(api_endpoint),
-            auto_install: false,
-            ..Default::default()
-        };
-        Self::new_with_config(config)
+        #[cfg(feature = "http-compilation")]
+        {
+            let config = CompilationConfig {
+                backend: CompilationBackend::Remote { endpoint: api_endpoint },
+                auto_install: false,
+                ..Default::default()
+            };
+            Self::new_with_config(config)
+        }
+
+        #[cfg(not(feature = "http-compilation"))]
+        {
+            panic!("new_mobile requires http-compilation feature");
+        }
     }
     
     pub fn set_compilation_config(&self, config: CompilationConfig) {
@@ -202,7 +222,7 @@ impl ContextRuntimeHandle {
     
     pub fn open(&self, uri: String, text: String) -> bool {
         let result = {
-            let runtime = self.sync_runtime.lock().unwrap();
+            let mut runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
@@ -215,7 +235,7 @@ impl ContextRuntimeHandle {
     
     pub fn update(&self, uri: String, text: String) -> bool {
         let result = {
-            let runtime = self.sync_runtime.lock().unwrap();
+            let mut runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
@@ -225,7 +245,7 @@ impl ContextRuntimeHandle {
     }
     
     pub fn close(&self, uri: String) {
-        let runtime = self.sync_runtime.lock().unwrap();
+        let mut runtime = self.sync_runtime.lock().unwrap();
         runtime.close_document(&uri);
     }
     
@@ -282,7 +302,10 @@ impl ContextRuntimeHandle {
         let jobs = self.active_jobs.lock().unwrap();
         jobs.keys().cloned().collect()
     }
-    
+}
+
+// Implementation of async methods (these are not exported via uniffi)
+impl ContextRuntimeHandle {
     async fn process_parse_task(
         runtime: Arc<Mutex<Runtime>>,
         live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
@@ -310,7 +333,7 @@ impl ContextRuntimeHandle {
         }
     }
     
-       async fn process_compile_task(
+    async fn process_compile_task(
         runtime: Arc<Mutex<Runtime>>,
         active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
         config: Arc<RwLock<CompilationConfig>>,
@@ -345,7 +368,7 @@ impl ContextRuntimeHandle {
                 }
             }
             
-            CompilationBackend::Local(path) => {
+            CompilationBackend::Local { path } => {
                 let binary_path = if let Some(path) = path {
                     PathBuf::from(path)
                 } else {
@@ -363,7 +386,7 @@ impl ContextRuntimeHandle {
                 Self::compile_local(runtime.clone(), &job.uri, &binary_path).await
             }
             
-            CompilationBackend::Remote(endpoint) => {
+            CompilationBackend::Remote { endpoint } => {
                 #[cfg(feature = "http-compilation")]
                 {
                     Self::compile_remote(http_client, &job.uri, endpoint, &config).await
@@ -569,6 +592,7 @@ impl ContextRuntimeHandle {
     }
 }
 
+// FFI types
 #[derive(Debug, Clone, Default, uniffi::Record)]
 #[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
 pub struct CompileResultFfi {
@@ -596,14 +620,14 @@ impl CompileResultFfi {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 #[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
 pub struct HighlightFfi {
     pub range: FfiRange,
     pub kind: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, uniffi::Record)]
 #[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticFfi {
     pub range: FfiRange,
@@ -612,13 +636,14 @@ pub struct DiagnosticFfi {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, uniffi::Record)]
 #[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
 pub struct FfiRange {
     pub start: u32,
     pub end: u32,
 }
 
+// Conversion implementations
 impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
     fn from(result: Result<CompilationResult, RuntimeError>) -> Self {
         match result {
@@ -673,8 +698,8 @@ impl From<CompilationResult> for CompileResultFfi {
             log: result.log,
             errors: result.errors.into_iter().map(|e| DiagnosticFfi {
                 range: FfiRange {
-                    start: e.column,
-                    end: e.column + 1,
+                    start: e.column as u32,
+                    end: (e.column + 1) as u32,
                 },
                 severity: "error".to_string(),
                 message: e.message,
@@ -682,8 +707,8 @@ impl From<CompilationResult> for CompileResultFfi {
             }).collect(),
             warnings: result.warnings.into_iter().map(|w| DiagnosticFfi {
                 range: FfiRange {
-                    start: w.column,
-                    end: w.column + 1,
+                    start: w.column as u32,
+                    end: (w.column + 1) as u32,
                 },
                 severity: "warning".to_string(),
                 message: w.message,
