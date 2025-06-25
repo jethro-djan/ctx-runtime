@@ -4,3 +4,5 @@
 # Rust related
 /target
 .actrc
+/ContextRuntime
+/generated

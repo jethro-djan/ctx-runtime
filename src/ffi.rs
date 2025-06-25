@@ -5,13 +5,6 @@ use uuid::Uuid;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::{
-    runtime::{Runtime, CompilationResult, RuntimeError},
-    highlight::{Highlight, HighlightKind},
-    diagnostic::Diagnostic,
-};
-
-// Callback trait for Swift
 #[uniffi::export(callback_interface)]
 pub trait CompilationCallback: Send + Sync {
     fn on_compilation_complete(&self, result: CompileResultFfi);
@@ -23,13 +16,12 @@ pub trait LiveUpdateCallback: Send + Sync {
     fn on_highlights_updated(&self, uri: String, highlights: Vec<HighlightFfi>);
 }
 
-// Compilation backend configuration
 #[derive(Debug, Clone)]
 pub enum CompilationBackend {
-    Auto,                           // Try local first, fallback to remote
-    Local(Option<String>),          // None = auto-detect, Some = specific path
-    Remote(String),                 // HTTP endpoint
-    LocalWithInstall {              // Desktop: install if missing
+    Auto,                           
+    Local(Option<String>),          
+    Remote(String),                 
+    LocalWithInstall {              
         install_path: Option<String>,
         download_url: String,
         fallback_remote: Option<String>,
@@ -55,7 +47,6 @@ impl Default for CompilationConfig {
     }
 }
 
-// Job tracking
 #[derive(Clone)]
 pub struct CompilationJob {
     pub id: String,
@@ -63,32 +54,29 @@ pub struct CompilationJob {
     pub callback: Option<Arc<dyn CompilationCallback>>,
 }
 
-// Background task types
 enum BackgroundTask {
     ParseDocument { uri: String, text: String },
     CompileDocument { job: CompilationJob },
 }
 
+#[derive(uniffi::Object)]
 pub struct ContextRuntimeHandle {
-    // Keep existing sync runtime
     sync_runtime: Arc<Mutex<Runtime>>,
     
-    // Add async components
     task_sender: mpsc::UnboundedSender<BackgroundTask>,
     live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
     
-    // Job tracking
     active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
     
-    // Compilation configuration
     compilation_config: Arc<RwLock<CompilationConfig>>,
     
-    // HTTP client for remote compilation
     #[cfg(feature = "http-compilation")]
     http_client: Arc<reqwest::Client>,
 }
 
+#[uniffi::export]
 impl ContextRuntimeHandle {
+    #[uniffi::constructor]
     pub fn new() -> Self {
         Self::new_with_config(CompilationConfig::default())
     }
@@ -108,7 +96,6 @@ impl ContextRuntimeHandle {
                 .expect("Failed to create HTTP client")
         );
         
-        // Background task processor
         let runtime_clone = sync_runtime.clone();
         let callback_clone = live_callback.clone();
         let jobs_clone = active_jobs.clone();
@@ -153,7 +140,6 @@ impl ContextRuntimeHandle {
         }
     }
     
-    // Convenience constructors for different platforms
     #[cfg(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android")))]
     pub fn new_desktop() -> Self {
         let config = CompilationConfig {
@@ -178,7 +164,6 @@ impl ContextRuntimeHandle {
         Self::new_with_config(config)
     }
     
-    // Configuration methods
     pub fn set_compilation_config(&self, config: CompilationConfig) {
         tokio::spawn({
             let compilation_config = self.compilation_config.clone();
@@ -206,7 +191,6 @@ impl ContextRuntimeHandle {
         });
     }
     
-    // Enhanced document management with live updates
     pub fn set_live_update_callback(&self, callback: Option<Arc<dyn LiveUpdateCallback>>) {
         tokio::spawn({
             let live_callback = self.live_callback.clone();
@@ -216,14 +200,12 @@ impl ContextRuntimeHandle {
         });
     }
     
-    // Keep existing sync API
     pub fn open(&self, uri: String, text: String) -> bool {
         let result = {
             let runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
-        // Trigger background parsing for live updates
         if result {
             let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri, text });
         }
@@ -231,20 +213,17 @@ impl ContextRuntimeHandle {
         result
     }
     
-    // Enhanced update with live parsing
     pub fn update(&self, uri: String, text: String) -> bool {
         let result = {
             let runtime = self.sync_runtime.lock().unwrap();
             runtime.open_document(uri.clone(), text.clone()).is_ok()
         };
         
-        // Always trigger background parsing for live updates
         let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri, text });
         
         result
     }
     
-    // Keep other sync methods unchanged
     pub fn close(&self, uri: String) {
         let runtime = self.sync_runtime.lock().unwrap();
         runtime.close_document(&uri);
@@ -271,13 +250,11 @@ impl ContextRuntimeHandle {
             .collect()
     }
     
-    // Keep sync compile for immediate needs (local only)
     pub fn compile(&self, uri: String) -> CompileResultFfi {
         let runtime = self.sync_runtime.lock().unwrap();
         runtime.compile_document(&uri).into()
     }
     
-    // NEW: Async compilation with callback
     pub fn compile_async(&self, uri: String, callback: Option<Arc<dyn CompilationCallback>>) -> String {
         let job_id = Uuid::new_v4().to_string();
         let job = CompilationJob {
@@ -286,38 +263,32 @@ impl ContextRuntimeHandle {
             callback,
         };
         
-        // Store job for tracking
         {
             let mut jobs = self.active_jobs.lock().unwrap();
             jobs.insert(job_id.clone(), job.clone());
         }
         
-        // Queue compilation
         let _ = self.task_sender.send(BackgroundTask::CompileDocument { job });
         
         job_id
     }
     
-    // NEW: Cancel compilation
     pub fn cancel_compilation(&self, job_id: String) -> bool {
         let mut jobs = self.active_jobs.lock().unwrap();
         jobs.remove(&job_id).is_some()
     }
     
-    // NEW: Get active compilation jobs
     pub fn get_active_compilations(&self) -> Vec<String> {
         let jobs = self.active_jobs.lock().unwrap();
         jobs.keys().cloned().collect()
     }
     
-    // Background task processors
     async fn process_parse_task(
         runtime: Arc<Mutex<Runtime>>,
         live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
         uri: String,
         text: String,
     ) {
-        // Small delay to debounce rapid typing
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         
         let (diagnostics, highlights) = {
@@ -333,7 +304,6 @@ impl ContextRuntimeHandle {
             (diagnostics, highlights)
         };
         
-        // Send live updates
         if let Some(callback) = live_callback.read().await.as_ref() {
             callback.on_diagnostics_updated(uri.clone(), diagnostics);
             callback.on_highlights_updated(uri, highlights);
@@ -438,13 +408,11 @@ impl ContextRuntimeHandle {
         job: CompilationJob,
         result: CompileResultFfi,
     ) {
-        // Remove from active jobs
         {
             let mut jobs = active_jobs.lock().unwrap();
             jobs.remove(&job.id);
         }
         
-        // Call callback if provided
         if let Some(callback) = job.callback {
             callback.on_compilation_complete(result);
         }
@@ -458,7 +426,6 @@ impl ContextRuntimeHandle {
         Self::complete_job(active_jobs, job, CompileResultFfi::error(error)).await;
     }
     
-    // Local compilation
     async fn compile_local(
         runtime: Arc<Mutex<Runtime>>,
         uri: &str,
@@ -472,7 +439,6 @@ impl ContextRuntimeHandle {
         result.into()
     }
     
-    // Remote compilation
     #[cfg(feature = "http-compilation")]
     async fn compile_remote(
         http_client: Arc<reqwest::Client>,
@@ -603,8 +569,7 @@ impl ContextRuntimeHandle {
     }
 }
 
-// Keep existing FFI types unchanged
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, uniffi::Record)]
 #[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
 pub struct CompileResultFfi {
     pub success: bool,
@@ -654,7 +619,6 @@ pub struct FfiRange {
     pub end: u32,
 }
 
-// Keep existing From implementations unchanged
 impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
     fn from(result: Result<CompilationResult, RuntimeError>) -> Self {
         match result {

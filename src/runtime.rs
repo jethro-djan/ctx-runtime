@@ -5,6 +5,7 @@ use std::process::Command;
 use std::io::Write;
 use crate::highlight::{Highlight, highlight};
 use crate::diagnostic::Diagnostic;
+use std::process::Command;
 
 pub struct Runtime {
     documents: RefCell<HashMap<String, DocumentData>>,
@@ -42,17 +43,19 @@ pub struct CompilationWarning {
 }
 
 pub struct ConTeXtCompiler {
-    executable: PathBuf,
+    pub executable: PathBuf,
     working_dir: PathBuf,
 }
 
 impl Runtime {
-    pub fn new() -> Self {
-        Runtime {
+    pub fn new() -> Result<Self, RuntimeError> {
+        let compiler = ConTeXtCompiler::new()?;
+        
+        Ok(Runtime {
             documents: RefCell::new(HashMap::new()),
-            compiler: ConTeXtCompiler::new(),
+            compiler,
             diagnostics: RefCell::new(HashMap::new()),
-        }
+        })
     }
 
     pub fn open_document(&self, uri: String, content: String) -> Result<(), RuntimeError> {
@@ -256,13 +259,13 @@ impl Runtime {
 }
 
 impl ConTeXtCompiler {
-    pub fn new() -> Self {
-        ConTeXtCompiler {
-            executable: PathBuf::from("context"),
-            working_dir: std::env::temp_dir(),
-        }
-    }
+    pub fn new() -> Result<Self, RuntimeError> {
+        let executable = which::which("mtxrun")
+            // .or_else(|_| which::which("texlua"))
+            // .or_else(|_| which::which("context-lmtx"))
+            .map_err(|_| RuntimeError::ParseError("Could not find ConTeXt executable".to_string()))?;
 
+<<<<<<< HEAD
     pub fn new_with_executable(executable: PathBuf) -> Self {
         ConTeXtCompiler {
             executable,
@@ -358,13 +361,133 @@ impl ConTeXtCompiler {
             errors,
             warnings,
             log: full_log,
+=======
+        Ok(ConTeXtCompiler {
+            executable,
+            working_dir: std::env::current_dir()?,
+>>>>>>> aac4d207ea2836c1cc79c5c33ee117f783681446
         })
     }
+
+    pub fn with_executable(executable: PathBuf) -> Result<Self, RuntimeError> {
+        if !executable.exists() {
+            return Err(RuntimeError::ParseError("Specified executable does not exist".to_string()));
+        }
+
+        Ok(ConTeXtCompiler {
+            executable,
+            working_dir: std::env::current_dir()?,
+        })
+    }
+
+    pub fn with_working_dir(mut self, dir: PathBuf) -> Result<Self, RuntimeError> {
+        if !dir.exists() {
+            return Err(RuntimeError::ParseError("Working directory does not exist".to_string()));
+        }
+        self.working_dir = dir;
+        Ok(self)
+    }
+
+pub fn compile(&self, input_file: &Path) -> Result<CompilationResult, RuntimeError> {
+    if !input_file.exists() {
+        return Err(RuntimeError::ParseError("Input file does not exist".to_string()));
+    }
+    
+    let input_file = input_file.canonicalize()?;
+    log::debug!("Compiling: {:?}", input_file);
+    
+    let output = Command::new(&self.executable)
+        .arg("--script")
+        .arg("context")
+        .arg("--run")
+        .arg("--synctex")
+        .arg("--nonstopmode")
+        .arg("--purgeall")
+        .arg("--pattern={.log,.tex.tuc}")
+        .arg(&input_file)
+        .current_dir(&self.working_dir)
+        .output()
+        .map_err(|e| RuntimeError::CompilationError(format!("Failed to execute ConTeXt: {}", e)))?;
+    
+    let log = String::from_utf8_lossy(&output.stdout).to_string();
+    let success = output.status.success();
+    
+    let (errors, warnings) = self.parse_log(&log);
+    
+    let output_path = if success {
+        self.find_output_pdf(&input_file)
+    } else {
+        None
+    };
+    
+    // Clean up any auxiliary files created during compilation
+    self.cleanup_auxiliary_files(&input_file);
+    
+    Ok(CompilationResult {
+        success,
+        output_path,
+        errors,
+        warnings,
+        log,
+    })
+}
+
+fn find_output_pdf(&self, input_file: &Path) -> Option<PathBuf> {
+    // Strategy 1: Same location as input file
+    let mut path = input_file.to_path_buf();
+    path.set_extension("pdf");
+    if path.exists() {
+        return Some(path);
+    }
+    
+    // Strategy 2: Working directory with input file stem
+    let pdf_name = input_file.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string()) + ".pdf";
+    
+    let possible_paths = vec![
+        self.working_dir.join(&pdf_name),
+        self.working_dir.join(input_file.file_name().unwrap_or_default()).with_extension("pdf"),
+    ];
+    
+    for path in possible_paths {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    
+    None
+}
+
+fn cleanup_auxiliary_files(&self, input_file: &Path) {
+    let base_name = input_file.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "temp".to_string());
+    
+    // Common ConTeXt auxiliary file extensions
+    let aux_extensions = ["aux", "log", "fls", "fdb_latexmk", "synctex.gz", "tuc"];
+    
+    for ext in &aux_extensions {
+        let aux_file = self.working_dir.join(format!("{}.{}", base_name, ext));
+        if aux_file.exists() {
+            let _ = std::fs::remove_file(&aux_file);
+        }
+        
+        // Also check in the input file's directory
+        if let Some(input_dir) = input_file.parent() {
+            let aux_file = input_dir.join(format!("{}.{}", base_name, ext));
+            if aux_file.exists() {
+                let _ = std::fs::remove_file(&aux_file);
+            }
+        }
+    }
+}
 
     fn parse_log(&self, log: &str) -> (Vec<CompilationError>, Vec<CompilationWarning>) {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         
+<<<<<<< HEAD
         // ConTeXt log parsing - this is a simplified version
         // You may need to enhance this based on actual ConTeXt log format
         for (line_num, line) in log.lines().enumerate() {
@@ -372,15 +495,27 @@ impl ConTeXtCompiler {
             
             // Error patterns
             if line.starts_with("! ") || line.contains("error") {
+=======
+        for line in log.lines() {
+            if line.starts_with("! ") {
+                // Error line
+                let message = line.trim_start_matches("! ").to_string();
+>>>>>>> aac4d207ea2836c1cc79c5c33ee117f783681446
                 errors.push(CompilationError {
                     file: String::new(), // ConTeXt logs don't always clearly indicate file
                     line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
                     column: 0,
-                    message: line.to_string(),
+                    message,
                 });
+<<<<<<< HEAD
             }
             // Warning patterns
             else if line.contains("warning") || line.contains("Warning") {
+=======
+            } else if let Some(pos) = line.find("Warning:") {
+                // Warning line
+                let message = line[pos..].to_string();
+>>>>>>> aac4d207ea2836c1cc79c5c33ee117f783681446
                 warnings.push(CompilationWarning {
                     file: String::new(),
                     line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
@@ -393,6 +528,14 @@ impl ConTeXtCompiler {
                 errors.push(CompilationError {
                     file: String::new(),
                     line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
+                    column: 0,
+                    message,
+                });
+            } else if line.contains("error:") {
+                // Alternative error format
+                errors.push(CompilationError {
+                    file: String::new(),
+                    line: 0,
                     column: 0,
                     message: line.to_string(),
                 });
@@ -503,6 +646,7 @@ pub enum RuntimeError {
     IoError(#[from] std::io::Error),
 }
 
+<<<<<<< HEAD
 impl Default for Runtime {
     fn default() -> Self {
         Self::new()
@@ -514,3 +658,5 @@ impl Default for ConTeXtCompiler {
         Self::new()
     }
 }
+=======
+>>>>>>> aac4d207ea2836c1cc79c5c33ee117f783681446

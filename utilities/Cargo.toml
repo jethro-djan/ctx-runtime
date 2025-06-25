@@ -1,0 +1,10 @@
+[package]
+name = "utilities"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+tempfile = "3"
