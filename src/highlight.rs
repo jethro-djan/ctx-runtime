@@ -1,5 +1,5 @@
+use crate::syntax::{SyntaxKind, SyntaxNode};
 use std::ops::Range;
-use crate::ast::ConTeXtNode;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Highlight {
@@ -30,60 +30,63 @@ impl HighlightKind {
     }
 }
 
-/// Main entry point for AST-based highlighting
-pub fn highlight(node: &ConTeXtNode) -> Vec<Highlight> {
+pub fn highlight(node: &SyntaxNode) -> Vec<Highlight> {
     let mut highlights = Vec::new();
     highlight_node(node, &mut highlights);
     highlights
 }
 
-/// Highlight AST nodes directly
-fn highlight_node(node: &ConTeXtNode, highlights: &mut Vec<Highlight>) {
-    match node {
-        ConTeXtNode::Command {   arguments, span, .. } => {
-            highlights.push(Highlight {
-                range: span.start..span.end,
-                kind: HighlightKind::Command,
-            });
-            
-            for arg in arguments {
-                highlight_node(arg, highlights);
-            }
-        },
-        
-        ConTeXtNode::StartStop { content, span, .. } => {
-            highlights.push(Highlight {
-                range: span.start..span.end,
-                kind: HighlightKind::Environment,
-            });
-            
-            // Highlight content recursively
-            for child in content {
-                highlight_node(child, highlights);
-            }
-        },
-        
-        ConTeXtNode::Text { span, .. } => {
-            highlights.push(Highlight {
-                range: span.start..span.end,
-                kind: HighlightKind::Text,
-            });
-        },
-        
-        ConTeXtNode::Comment { span, .. } => {
-            highlights.push(Highlight {
-                range: span.start..span.end,
-                kind: HighlightKind::Comment,
-            });
-        },
-        
-        ConTeXtNode::Document { preamble, body } => {
-            for node in preamble {
-                highlight_node(node, highlights);
-            }
-            for node in body {
-                highlight_node(node, highlights);
+fn highlight_node(node: &SyntaxNode, highlights: &mut Vec<Highlight>) {
+    match node.kind() {
+        SyntaxKind::Command => {
+            if let Some(token) = node.first_token() {
+                highlights.push(Highlight {
+                    range: text_range_to_std_range(token.text_range()),
+                    kind: HighlightKind::Command,
+                });
             }
         }
+        SyntaxKind::Environment => {
+            if let Some(token) = node.first_token() {
+                highlights.push(Highlight {
+                    range: text_range_to_std_range(token.text_range()),
+                    kind: HighlightKind::Environment,
+                });
+            }
+        }
+        SyntaxKind::Options => {
+            if let Some(token) = node.first_token() {
+                highlights.push(Highlight {
+                    range: text_range_to_std_range(token.text_range()),
+                    kind: HighlightKind::Option,
+                });
+            }
+        }
+        SyntaxKind::Text => {
+            if let Some(token) = node.first_token() {
+                highlights.push(Highlight {
+                    range: text_range_to_std_range(token.text_range()),
+                    kind: HighlightKind::Text,
+                });
+            }
+        }
+        SyntaxKind::Comment => {
+            if let Some(token) = node.first_token() {
+                highlights.push(Highlight {
+                    range: text_range_to_std_range(token.text_range()),
+                    kind: HighlightKind::Comment,
+                });
+            }
+        }
+        _ => {}
+    }
+    
+    for child in node.children() {
+        highlight_node(&child, highlights);
     }
 }
+
+pub fn text_range_to_std_range(range: rowan::TextRange) -> Range<usize> {
+    range.start().into()..range.end().into()
+}
+

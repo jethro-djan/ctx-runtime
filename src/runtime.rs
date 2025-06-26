@@ -1,151 +1,161 @@
 use std::collections::HashMap;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ops::Range;
 use std::io::Write;
+use bumpalo::Bump;
+use std::sync::{Mutex, Arc};
 use crate::highlight::{Highlight, highlight};
 use crate::diagnostic::Diagnostic;
+use crate::syntax::{SyntaxKind, SyntaxTree};
+use crate::parser::parse_text;
 
 pub struct Runtime {
-    documents: RefCell<HashMap<String, DocumentData>>,
+    documents: Mutex<HashMap<String, DocumentData>>,
     compiler: ConTeXtCompiler,
-    diagnostics: RefCell<HashMap<String, Vec<Diagnostic>>>,
+    diagnostics: Mutex<HashMap<String, Vec<Diagnostic>>>,
 }
 
 struct DocumentData {
     source: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompilationResult {
-    pub success: bool,
-    pub output_path: Option<PathBuf>,
-    pub errors: Vec<CompilationError>,
-    pub warnings: Vec<CompilationWarning>,
-    pub log: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompilationError {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub message: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompilationWarning {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub message: String,
-}
-
-pub struct ConTeXtCompiler {
-    executable: PathBuf,
-    working_dir: PathBuf,
+    syntax_tree: SyntaxTree,
 }
 
 impl Runtime {
     pub fn new() -> Self {
         Runtime {
-            documents: RefCell::new(HashMap::new()),
+            documents: Mutex::new(HashMap::new()),
             compiler: ConTeXtCompiler::new(),
-            diagnostics: RefCell::new(HashMap::new()),
+            diagnostics: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_document<F, R>(&self, uri: &str, f: F) -> Option<R>
+    where
+        F: FnOnce(&DocumentData) -> R
+    {
+        let docs = self.documents.lock().ok()?;
+        docs.get(uri).map(f)
     }
 
     pub fn open_document(&self, uri: String, content: String) -> Result<(), RuntimeError> {
-        self.documents.borrow_mut().insert(uri.clone(), DocumentData {
+        let syntax_tree = parse_text(&content);
+
+        let document = DocumentData {
             source: content,
-        });
-        self.update_parse_diagnostics(&uri);
+            syntax_tree,
+        };
+
+        self.documents.lock()
+            .map_err(|_| RuntimeError::LockPoisoned)?
+            .insert(uri.clone(), document);
+
+        self.update_diagnostics(&uri)?;
         Ok(())
     }
 
-    pub fn update_document(&self, uri: String, content: String) -> Result<(), RuntimeError> {
-        self.open_document(uri, content)
+    pub fn update_document(
+        &self, 
+        uri: &str, 
+        edit_range: Range<usize>, 
+        new_text: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut documents = self.documents.lock()
+            .map_err(|_| RuntimeError::LockPoisoned)?;
+
+        if let Some(document) = documents.get_mut(uri) {
+            let mut new_source = document.source.clone();
+            new_source.replace_range(edit_range.clone(), new_text);
+            
+            let new_tree = parse_text(&new_source);
+
+            *document = DocumentData {
+                source: new_source,
+                syntax_tree: new_tree,
+            };
+            
+            self.update_diagnostics(uri)?;
+        }
+
+        Ok(())
     }
 
     pub fn close_document(&self, uri: &str) {
-        self.documents.borrow_mut().remove(uri);
-        self.diagnostics.borrow_mut().remove(uri);
-    }
-
-    pub fn get_document_source(&self, uri: &str) -> Option<String> {
-        self.documents.borrow().get(uri).map(|d| d.source.clone())
-    }
-
-    pub fn get_document_ast(&self, uri: &str) -> Option<crate::ast::ConTeXtNode> {
-        self.documents.borrow().get(uri).and_then(|d| {
-            crate::parser::parse_document(&d.source)
-                .map_err(|e| {
-                    log::warn!("Failed to parse document {}: {:?}", uri, e);
-                    e
-                })
-                .ok()
-        })
+        self.documents.lock().unwrap().remove(uri);
+        self.diagnostics.lock().unwrap().remove(uri);
     }
 
     pub fn get_highlights(&self, uri: &str) -> Vec<Highlight> {
-        self.get_document_ast(uri)
-            .map(|ast| highlight(&ast))
+        self.with_document(uri, |doc| highlight(&doc.syntax_tree.root()))
             .unwrap_or_default()
+    }
+
+    pub fn get_document_source(&self, uri: &str) -> Option<String> {
+        self.with_document(uri, |doc| doc.source.clone())
     }
 
     pub fn get_diagnostics(&self, uri: &str) -> Vec<Diagnostic> {
-        self.diagnostics.borrow()
-            .get(uri)
-            .cloned()
+        self.diagnostics.lock()
+            .ok()
+            .and_then(|diags| diags.get(uri).cloned())
             .unwrap_or_default()
     }
 
-    fn update_parse_diagnostics(&self, uri: &str) {
+    fn update_diagnostics(&self, uri: &str) -> Result<(), RuntimeError> {
         let mut diagnostics = Vec::new();
         
-        if let Some(ast) = self.get_document_ast(uri) {
-            self.collect_ast_diagnostics(&ast, &mut diagnostics);
+        if let Some(doc) = self.documents.lock().unwrap().get(uri) {
+            self.collect_syntax_diagnostics(&doc.syntax_tree, &mut diagnostics);
         }
         
-        self.diagnostics.borrow_mut().insert(uri.to_string(), diagnostics);
+        let mut diag_map = self.diagnostics.lock()
+            .map_err(|_| RuntimeError::LockPoisoned)?;
+        diag_map.insert(uri.to_string(), diagnostics);
+        
+        Ok(())
     }
 
-    fn collect_ast_diagnostics(&self, node: &crate::ast::ConTeXtNode, diagnostics: &mut Vec<Diagnostic>) {
-        use crate::ast::ConTeXtNode;
-        
-        match node {
-            ConTeXtNode::Command { name, span, .. } => {
-                if !self.is_known_command(name) {
-                    diagnostics.push(Diagnostic::warning(
-                        span.start_line as u32,
-                        span.start_col as u32,
-                        span.len() as u32,
-                        format!("Unknown command: \\{}", name),
-                        "parser".to_string(),
-                    ));
+    fn collect_syntax_diagnostics(&self, tree: &SyntaxTree, diagnostics: &mut Vec<Diagnostic>) {
+        for node in tree.root().descendants() {
+            match node.kind() {
+                SyntaxKind::Command => {
+                    if let Some(name_token) = node.first_token() {
+                        let name = name_token.text().trim_start_matches('\\');
+                        if !self.is_known_command(name) {
+                            diagnostics.push(Diagnostic::warning(
+                                name_token.text_range().start().into(),
+                                name_token.text_range().len().into(),
+                                format!("Unknown command: \\{}", name),
+                                "parser".to_string(),
+                            ));
+                        }
+                    }
                 }
+                SyntaxKind::Environment => {
+                    if let Some(name_token) = node.first_token() {
+                        let name = name_token.text().trim_start_matches(r"\start");
+                        if !self.is_known_environment(name) {
+                            diagnostics.push(Diagnostic::warning(
+                                name_token.text_range().start().into(),
+                                name_token.text_range().len().into(),
+                                format!("Unknown environment: {}", name),
+                                "parser".to_string(),
+                            ));
+                        }
+                    }
+                }
+                SyntaxKind::Error => {
+                    if let Some(token) = node.first_token() {
+                        diagnostics.push(Diagnostic::error(
+                            token.text_range().start().into(),
+                            token.text_range().len().into(),
+                            "Syntax error".to_string(),
+                            "parser".to_string(),
+                        ));
+                    }
+                }
+                _ => {}
             }
-            ConTeXtNode::StartStop { name, content, span, .. } => {
-                if !self.is_known_environment(name) {
-                    diagnostics.push(Diagnostic::warning(
-                        span.start_line as u32,
-                        span.start_col as u32,
-                        span.len() as u32,
-                        format!("Unknown environment: {}", name),
-                        "parser".to_string(),
-                    ));
-                }
-                
-                for child in content {
-                    self.collect_ast_diagnostics(child, diagnostics);
-                }
-            }
-            ConTeXtNode::Document { preamble, body } => {
-                for node in preamble.iter().chain(body.iter()) {
-                    self.collect_ast_diagnostics(node, diagnostics);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -178,11 +188,9 @@ impl Runtime {
         let temp_file = self.create_temp_file(uri, &content)?;
         let result = self.compiler.compile(&temp_file)?;
         
-        // Clean up temp file
         let _ = std::fs::remove_file(&temp_file);
         
-        // Update diagnostics with compilation errors
-        self.update_compilation_diagnostics(uri, &result);
+        self.update_compilation_diagnostics(uri, &result)?;
         
         Ok(result)
     }
@@ -200,154 +208,219 @@ impl Runtime {
         Ok(temp_path)
     }
 
-    fn update_compilation_diagnostics(&self, uri: &str, result: &CompilationResult) {
-        let mut diagnostics = self.diagnostics.borrow()
-            .get(uri)
-            .cloned()
-            .unwrap_or_default();
+    fn update_compilation_diagnostics(
+        &self, 
+        uri: &str, 
+        result: &CompilationResult
+    ) -> Result<(), RuntimeError> {
+        let mut diag_map = self.diagnostics.lock()
+            .map_err(|_| RuntimeError::LockPoisoned)?;
         
-        // Remove old compiler diagnostics
+        let diagnostics = diag_map.entry(uri.to_string())
+            .or_default();
+        
         diagnostics.retain(|d| d.source != "compiler");
         
-        // Add new compilation errors
-        for error in &result.errors {
-            diagnostics.push(Diagnostic::error(
-                error.line,
-                error.column,
-                1,
-                error.message.clone(),
-                "compiler".to_string(),
-            ));
+        // Convert line/column positions to absolute offsets
+        if let Some(document) = self.documents.lock().unwrap().get(uri) {
+            for error in &result.errors {
+                if let Some(offset) = self.line_column_to_offset(&document.source, error.line, error.column) {
+                    diagnostics.push(Diagnostic::error(
+                        offset,
+                        1,  // Length of 1 for compiler errors
+                        error.message.clone(),
+                        "compiler".to_string(),
+                    ));
+                }
+            }
+            
+            for warning in &result.warnings {
+                if let Some(offset) = self.line_column_to_offset(&document.source, warning.line, warning.column) {
+                    diagnostics.push(Diagnostic::warning(
+                        offset,
+                        1,  // Length of 1 for compiler warnings
+                        warning.message.clone(),
+                        "compiler".to_string(),
+                    ));
+                }
+            }
         }
         
-        // Add new compilation warnings
-        for warning in &result.warnings {
-            diagnostics.push(Diagnostic::warning(
-                warning.line,
-                warning.column,
-                1,
-                warning.message.clone(),
-                "compiler".to_string(),
-            ));
+        Ok(())
+    }
+
+    /// Helper function to convert line/column to absolute offset
+    fn line_column_to_offset(&self, text: &str, line: u32, column: u32) -> Option<usize> {
+        let mut current_line = 1;
+        let mut current_offset = 0;
+        
+        for (offset, c) in text.char_indices() {
+            if current_line == line as usize {
+                let col = column as usize;
+                if current_offset + col < offset {
+                    return Some(offset + col);
+                }
+            }
+            
+            if c == '\n' {
+                current_line += 1;
+                current_offset = offset;
+            }
         }
         
-        self.diagnostics.borrow_mut().insert(uri.to_string(), diagnostics);
+        None
     }
 
-    // NEW: Method to set custom context executable path
-    pub fn set_context_executable(&mut self, path: PathBuf) {
-        self.compiler.executable = path;
+    pub fn set_context_executable(&self, path: PathBuf) {
+        self.compiler.set_executable(path);
     }
 
-    // NEW: Method to set working directory
-    pub fn set_working_directory(&mut self, path: PathBuf) {
-        self.compiler.working_dir = path;
+    pub fn set_working_directory(&self, path: PathBuf) {
+        self.compiler.set_working_directory(path);
     }
 
-    // NEW: Method to check if context executable exists
     pub fn context_executable_exists(&self) -> bool {
         self.compiler.executable_exists()
     }
 
-    // NEW: Method to get current executable path
-    pub fn get_context_executable(&self) -> &PathBuf {
-        &self.compiler.executable
+    pub fn get_context_executable(&self) -> PathBuf {
+        self.compiler.get_executable()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilationResult {
+    pub success: bool,
+    pub output_path: Option<PathBuf>,
+    pub errors: Vec<CompilationError>,
+    pub warnings: Vec<CompilationWarning>,
+    pub log: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilationError {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilationWarning {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub message: String,
+}
+
+pub struct ConTeXtCompiler {
+    executable: Mutex<PathBuf>,
+    working_dir: Mutex<PathBuf>,
 }
 
 impl ConTeXtCompiler {
     pub fn new() -> Self {
         ConTeXtCompiler {
-            executable: PathBuf::from("context"),
-            working_dir: std::env::temp_dir(),
-        }
-    }
-
-    pub fn new_with_executable(executable: PathBuf) -> Self {
-        ConTeXtCompiler {
-            executable,
-            working_dir: std::env::temp_dir(),
+            executable: Mutex::new(PathBuf::from("context")),
+            working_dir: Mutex::new(std::env::temp_dir()),
         }
     }
 
     pub fn executable_exists(&self) -> bool {
-        // Check if the executable exists and is executable
-        if self.executable.is_absolute() {
-            self.executable.exists()
+        let executable = self.executable.lock().unwrap();
+        if executable.is_absolute() {
+            executable.exists()
         } else {
-            // For relative paths, try to find in PATH
-            self.find_in_path().is_some()
+            self.find_in_path(&executable).is_some()
         }
     }
 
-    fn find_in_path(&self) -> Option<PathBuf> {
-        if let Ok(path_var) = std::env::var("PATH") {
-            for path in std::env::split_paths(&path_var) {
-                let full_path = path.join(&self.executable);
+    pub fn set_executable(&self, path: PathBuf) {
+        *self.executable.lock().unwrap() = path;
+    }
+
+    pub fn get_executable(&self) -> PathBuf {
+        self.executable.lock().unwrap().clone()
+    }
+
+    pub fn set_working_directory(&self, path: PathBuf) {
+        *self.working_dir.lock().unwrap() = path;
+    }
+
+    fn find_in_path(&self, executable: &Path) -> Option<PathBuf> {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).find_map(|dir| {
+                let full_path = dir.join(executable);
                 if full_path.exists() {
-                    return Some(full_path);
-                }
-                
-                // On Windows, also try with .exe extension
-                #[cfg(windows)]
-                {
-                    let exe_path = path.join(format!("{}.exe", self.executable.display()));
-                    if exe_path.exists() {
-                        return Some(exe_path);
+                    Some(full_path)
+                } else {
+                    #[cfg(windows)]
+                    {
+                        let with_exe = dir.join(format!("{}.exe", executable.display()));
+                        with_exe.exists().then_some(with_exe)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        None
                     }
                 }
-            }
-        }
-        None
+            })
+        })
     }
 
     pub fn compile(&self, input_file: &Path) -> Result<CompilationResult, RuntimeError> {
-        // Ensure the executable exists before attempting compilation
-        if !self.executable_exists() {
-            return Err(RuntimeError::CompilationError(
-                format!("ConTeXt executable not found: {}", self.executable.display())
-            ));
-        }
+        let executable = self.get_executable_path()?;
+        let working_dir = self.working_dir.lock().unwrap().clone();
 
-        let executable_path = if self.executable.is_absolute() {
-            self.executable.clone()
-        } else {
-            self.find_in_path().unwrap_or_else(|| self.executable.clone())
-        };
-
-        let output = Command::new(&executable_path)
+        let output = Command::new(&executable)
             .arg("--batchmode")
             .arg("--nonstopmode")
-            .arg("--purgeall") // Clean up auxiliary files
+            .arg("--purgeall")
             .arg(input_file)
-            .current_dir(&self.working_dir)
+            .current_dir(&working_dir)
             .output()
             .map_err(|e| RuntimeError::CompilationError(
-                format!("Failed to execute ConTeXt ({}): {}", executable_path.display(), e)
+                format!("Failed to execute ConTeXt ({}): {}", executable.display(), e)
             ))?;
 
-        let log = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        self.process_output(output, input_file)
+    }
+
+    fn get_executable_path(&self) -> Result<PathBuf, RuntimeError> {
+        let executable = self.executable.lock().unwrap();
+        if executable.is_absolute() {
+            if executable.exists() {
+                Ok(executable.clone())
+            } else {
+                Err(RuntimeError::CompilationError(
+                    format!("ConTeXt executable not found: {}", executable.display())
+                ))
+            }
+        } else {
+            self.find_in_path(&executable)
+                .ok_or_else(|| RuntimeError::CompilationError(
+                    format!("ConTeXt executable not found in PATH: {}", executable.display())
+                ))
+        }
+    }
+
+    fn process_output(&self, output: std::process::Output, input_file: &Path) -> Result<CompilationResult, RuntimeError> {
+        let log = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         let success = output.status.success();
-        
-        // Combine stdout and stderr for comprehensive log
+
         let full_log = if stderr.is_empty() {
-            log
+            log.into_owned()
         } else {
             format!("{}\n--- stderr ---\n{}", log, stderr)
         };
-        
+
         let (errors, warnings) = self.parse_log(&full_log);
-        
+
         let output_path = if success {
             let mut path = input_file.to_path_buf();
             path.set_extension("pdf");
-            // Only return the path if the PDF actually exists
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            path.exists().then_some(path)
         } else {
             None
         };
@@ -365,21 +438,17 @@ impl ConTeXtCompiler {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         
-        // ConTeXt log parsing - this is a simplified version
-        // You may need to enhance this based on actual ConTeXt log format
         for (line_num, line) in log.lines().enumerate() {
             let line = line.trim();
             
-            // Error patterns
             if line.starts_with("! ") || line.contains("error") {
                 errors.push(CompilationError {
-                    file: String::new(), // ConTeXt logs don't always clearly indicate file
+                    file: String::new(),
                     line: self.extract_line_number(line).unwrap_or(line_num as u32 + 1),
                     column: 0,
                     message: line.to_string(),
                 });
             }
-            // Warning patterns
             else if line.contains("warning") || line.contains("Warning") {
                 warnings.push(CompilationWarning {
                     file: String::new(),
@@ -388,7 +457,6 @@ impl ConTeXtCompiler {
                     message: line.to_string(),
                 });
             }
-            // TeX error patterns
             else if line.starts_with("tex error") {
                 errors.push(CompilationError {
                     file: String::new(),
@@ -403,96 +471,34 @@ impl ConTeXtCompiler {
     }
 
     fn extract_line_number(&self, line: &str) -> Option<u32> {
-        // Try to extract line numbers from various ConTeXt error formats
-        // This is a simplified implementation - you may need to enhance this
-        
-        // Look for patterns like "line 42" or "l.42"
-        if let Some(pos) = line.find("line ") {
-            let after_line = &line[pos + 5..];
-            if let Some(space_pos) = after_line.find(' ') {
-                if let Ok(num) = after_line[..space_pos].parse::<u32>() {
-                    return Some(num);
-                }
-            }
-        }
-        
-        if let Some(pos) = line.find("l.") {
-            let after_l = &line[pos + 2..];
-            let mut end_pos = 0;
-            for (i, c) in after_l.char_indices() {
-                if !c.is_ascii_digit() {
-                    end_pos = i;
-                    break;
-                }
-            }
-            if end_pos > 0 {
-                if let Ok(num) = after_l[..end_pos].parse::<u32>() {
-                    return Some(num);
-                }
-            }
-        }
-        
-        None
-    }
-
-    // NEW: Method to test if compilation works
-    pub fn test_compilation(&self) -> Result<bool, RuntimeError> {
-        // Create a minimal test document
-        let test_content = r#"\starttext
-Hello, ConTeXt!
-\stoptext"#;
-        
-        let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("context_test.tex");
-        
-        // Write test file
-        std::fs::write(&test_file, test_content)?;
-        
-        // Try to compile
-        let result = self.compile(&test_file);
-        
-        // Clean up
-        let _ = std::fs::remove_file(&test_file);
-        if let Ok(ref comp_result) = result {
-            if let Some(ref pdf_path) = comp_result.output_path {
-                let _ = std::fs::remove_file(pdf_path);
-            }
-        }
-        
-        match result {
-            Ok(comp_result) => Ok(comp_result.success),
-            Err(_) => Ok(false),
-        }
-    }
-
-    // NEW: Get version information
-    pub fn get_version(&self) -> Result<String, RuntimeError> {
-        if !self.executable_exists() {
-            return Err(RuntimeError::CompilationError(
-                format!("ConTeXt executable not found: {}", self.executable.display())
-            ));
-        }
-
-        let executable_path = if self.executable.is_absolute() {
-            self.executable.clone()
-        } else {
-            self.find_in_path().unwrap_or_else(|| self.executable.clone())
-        };
-
-        let output = Command::new(&executable_path)
-            .arg("--version")
-            .output()
-            .map_err(|e| RuntimeError::CompilationError(
-                format!("Failed to get ConTeXt version: {}", e)
-            ))?;
-
-        let version_info = String::from_utf8_lossy(&output.stdout);
-        Ok(version_info.trim().to_string())
+        line.find("line ")
+            .and_then(|pos| {
+                let rest = &line[pos + 5..];
+                let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                rest[..num_end].parse().ok()
+            })
+            .or_else(|| {
+                line.find("l.")
+                    .and_then(|pos| {
+                        let rest = &line[pos + 2..];
+                        let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                        rest[..num_end].parse().ok()
+                    })
+            })
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("Document not found: {0}")]
+    DocumentNotFound(String),
+    
+    #[error("Mutex/RwLock poisoned")]
+    LockPoisoned,
+    
+    #[error("Document access failed: {0}")]
+    DocumentAccess(String),
+
     #[error("Parse error: {0}")]
     ParseError(String),
     
@@ -504,12 +510,6 @@ pub enum RuntimeError {
 }
 
 impl Default for Runtime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Default for ConTeXtCompiler {
     fn default() -> Self {
         Self::new()
     }

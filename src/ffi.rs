@@ -1,76 +1,145 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use tokio::sync::{mpsc, RwLock};
+use std::ops::Range;
 use uuid::Uuid;
+use std::thread;
+use std::sync::{Arc, RwLock, Mutex};
 
 use crate::runtime::{Runtime, CompilationResult, RuntimeError};
 use crate::highlight::Highlight;
 use crate::diagnostic::Diagnostic;
+use crate::ffi_types::*;
+use crate::conversions::*;
+
+use std::sync::mpsc;
+use tokio::sync::oneshot;
+use uniffi::{self, Object};
 
 #[uniffi::export(with_foreign)]
-pub trait LiveUpdateCallback: Send + Sync {
+pub trait LiveUpdateCallback: Send + Sync + std::fmt::Debug {
     fn on_diagnostics_updated(&self, uri: String, diagnostics: Vec<DiagnosticFfi>);
     fn on_highlights_updated(&self, uri: String, highlights: Vec<HighlightFfi>);
-}
-
-#[uniffi::export(with_foreign)]
-pub trait CompilationCallback: Send + Sync {
-    fn on_compilation_complete(&self, result: CompileResultFfi);
-}
-
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct CompilationConfig {
-    pub backend: CompilationBackend,
-    pub auth_token: Option<String>,
-    pub timeout_seconds: u64,
-    pub auto_install: bool,
-}
-
-impl Default for CompilationConfig {
-    fn default() -> Self {
-        Self {
-            backend: CompilationBackend::Auto,
-            auth_token: None,
-            timeout_seconds: 60,
-            auto_install: false,
-        }
+    
+    fn on_error(&self, error: RuntimeErrorFfi) {
+        log::warn!("Unhandled error in callback: {:?}", error);
     }
 }
 
-#[derive(Debug, Clone, uniffi::Enum)]
-pub enum CompilationBackend {
-    Auto,
-    Local { path: Option<String> },
-    Remote { endpoint: String },
-    LocalWithInstall { 
-        install_path: Option<String>, 
-        download_url: String, 
-        fallback_remote: Option<String> 
+#[uniffi::export(with_foreign)]
+pub trait CompilationCallback: Send + Sync + std::fmt::Debug {
+    fn on_progress(&self, progress: f32);
+    fn on_compilation_complete(&self, result: CompileResultFfi);
+    
+    fn on_error(&self, error: RuntimeErrorFfi) {
+        log::warn!("Unhandled compilation error: {:?}", error);
+    }
+}
+
+#[derive(Debug)]
+enum RuntimeCommand {
+    OpenDocument { 
+        uri: String, 
+        content: String, 
+        reply: oneshot::Sender<Result<(), RuntimeError>> 
     },
+    UpdateDocument { 
+        uri: String, 
+        edit_range: Range<usize>, 
+        new_text: String, 
+        reply: oneshot::Sender<Result<(), RuntimeError>> 
+    },
+    CloseDocument { 
+        uri: String 
+    },
+    GetDocumentSource { 
+        uri: String, 
+        reply: oneshot::Sender<Option<String>> 
+    },
+    GetHighlights { 
+        uri: String, 
+        reply: oneshot::Sender<Vec<Highlight>> 
+    },
+    GetDiagnostics { 
+        uri: String, 
+        reply: oneshot::Sender<Vec<Diagnostic>> 
+    },
+    CompileDocument { 
+        uri: String, 
+        reply: oneshot::Sender<Result<CompilationResult, RuntimeError>> 
+    },
+    SetContextExecutable { 
+        path: PathBuf 
+    },
+    SetWorkingDirectory { 
+        path: PathBuf 
+    },
+    CheckExecutableExists { 
+        reply: oneshot::Sender<bool> 
+    },
+    GetExecutablePath { 
+        reply: oneshot::Sender<PathBuf> 
+    },
+    Shutdown,
 }
 
+#[derive(Debug)]
 enum BackgroundTask {
-    ParseDocument { uri: String, text: String },
-    CompileDocument { job: CompilationJob },
+    ParseDocument { 
+        uri: String,
+    },
+    CompileDocument { 
+        job: CompilationJob 
+    },
+    Shutdown,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CompilationJob {
     id: String,
     uri: String,
     callback: Option<Arc<dyn CompilationCallback>>,
 }
 
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct CompilationConfig {
+    pub backend: CompilationBackend,
+    pub timeout_seconds: u64,
+    pub auth_token: Option<String>,
+}
+
+#[derive(uniffi::Enum, Debug, Clone)]
+pub enum CompilationBackend {
+    Auto,
+    Local { 
+        executable_path: Option<String>
+    },
+    #[cfg(feature = "http-compilation")]
+    Remote { 
+        endpoint: String 
+    },
+    LocalWithInstall { 
+        install_path: String 
+    },
+}
+
+impl Default for CompilationConfig {
+    fn default() -> Self {
+        Self {
+            backend: CompilationBackend::Auto,
+            timeout_seconds: 60,
+            auth_token: None,
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct ContextRuntimeHandle {
-    sync_runtime: Arc<Mutex<Runtime>>,
-    
-    task_sender: mpsc::UnboundedSender<BackgroundTask>,
+    runtime_sender: mpsc::Sender<RuntimeCommand>,
+    task_sender: tokio::sync::mpsc::UnboundedSender<BackgroundTask>,
+    _task_worker: tokio::task::JoinHandle<()>,
+    _runtime_thread: thread::JoinHandle<()>,
     live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
-    
     active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
-    
     compilation_config: Arc<RwLock<CompilationConfig>>,
     
     #[cfg(feature = "http-compilation")]
@@ -86,8 +155,9 @@ impl ContextRuntimeHandle {
     
     #[uniffi::constructor]
     pub fn new_with_config(config: CompilationConfig) -> Self {
-        let sync_runtime = Arc::new(Mutex::new(Runtime::new()));
-        let (task_sender, mut task_receiver) = mpsc::unbounded_channel::<BackgroundTask>();
+        let (runtime_sender, runtime_receiver) = mpsc::channel::<RuntimeCommand>();
+        let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel::<BackgroundTask>();
+        
         let live_callback = Arc::new(RwLock::new(None));
         let active_jobs = Arc::new(Mutex::new(HashMap::new()));
         let compilation_config = Arc::new(RwLock::new(config));
@@ -95,47 +165,86 @@ impl ContextRuntimeHandle {
         #[cfg(feature = "http-compilation")]
         let http_client = Arc::new(
             reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .expect("Failed to create HTTP client")
         );
         
-        let runtime_clone = sync_runtime.clone();
-        let callback_clone = live_callback.clone();
-        let jobs_clone = active_jobs.clone();
-        let config_clone = compilation_config.clone();
-        
-        #[cfg(feature = "http-compilation")]
-        let http_client_clone = http_client.clone();
-        
-        tokio::spawn(async move {
-            while let Some(task) = task_receiver.recv().await {
-                match task {
-                    BackgroundTask::ParseDocument { uri, text } => {
-                        Self::process_parse_task(
-                            runtime_clone.clone(),
-                            callback_clone.clone(),
-                            uri,
-                            text,
-                        ).await;
+        let runtime_thread = thread::spawn(move || {
+            let mut runtime = Runtime::new();
+            
+            while let Ok(command) = runtime_receiver.recv() {
+                match command {
+                    RuntimeCommand::OpenDocument { uri, content, reply } => {
+                        let _ = reply.send(runtime.open_document(uri, content));
                     }
-                    BackgroundTask::CompileDocument { job } => {
-                        Self::process_compile_task(
-                            runtime_clone.clone(),
-                            jobs_clone.clone(),
-                            config_clone.clone(),
-                            #[cfg(feature = "http-compilation")]
-                            http_client_clone.clone(),
-                            job,
-                        ).await;
+                    RuntimeCommand::UpdateDocument { uri, edit_range, new_text, reply } => {
+                        let result = runtime.update_document(&uri, edit_range, &new_text);
+                        let _ = reply.send(result);
                     }
+                    RuntimeCommand::CloseDocument { uri } => {
+                        runtime.close_document(&uri);
+                    }
+                    RuntimeCommand::GetDocumentSource { uri, reply } => {
+                        let source = runtime.get_document_source(&uri);
+                        let _ = reply.send(source);
+                    }
+                    RuntimeCommand::GetHighlights { uri, reply } => {
+                        let highlights = runtime.get_highlights(&uri);
+                        let _ = reply.send(highlights);
+                    }
+                    RuntimeCommand::GetDiagnostics { uri, reply } => {
+                        let diagnostics = runtime.get_diagnostics(&uri);
+                        let _ = reply.send(diagnostics);
+                    }
+                    RuntimeCommand::CompileDocument { uri, reply } => {
+                        let result = runtime.compile_document(&uri);
+                        let _ = reply.send(result);
+                    }
+                    RuntimeCommand::SetContextExecutable { path } => {
+                        runtime.set_context_executable(path);
+                    }
+                    RuntimeCommand::SetWorkingDirectory { path } => {
+                        runtime.set_working_directory(path);
+                    }
+                    RuntimeCommand::CheckExecutableExists { reply } => {
+                        let exists = runtime.context_executable_exists();
+                        let _ = reply.send(exists);
+                    }
+                    RuntimeCommand::GetExecutablePath { reply } => {
+                        let path = runtime.get_context_executable().clone();
+                        let _ = reply.send(path);
+                    }
+                    RuntimeCommand::Shutdown => break,
                 }
             }
         });
         
+        let callback_clone = live_callback.clone();
+        let jobs_clone = active_jobs.clone();
+        let config_clone = compilation_config.clone();
+        let runtime_sender_clone = runtime_sender.clone();
+        
+        #[cfg(feature = "http-compilation")]
+        let http_client_clone = http_client.clone();
+        
+        let task_worker = tokio::spawn(async move {
+            Self::task_worker(
+                task_receiver,
+                callback_clone,
+                jobs_clone,
+                config_clone,
+                runtime_sender_clone,
+                #[cfg(feature = "http-compilation")]
+                http_client_clone,
+            ).await;
+        });
+        
         Self {
-            sync_runtime,
+            runtime_sender,
             task_sender,
+            _task_worker: task_worker,
+            _runtime_thread: runtime_thread,
             live_callback,
             active_jobs,
             compilation_config,
@@ -144,141 +253,110 @@ impl ContextRuntimeHandle {
         }
     }
     
-    #[uniffi::constructor]
-    pub fn new_desktop() -> Self {
-        #[cfg(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android")))]
-        {
-            let config = CompilationConfig {
-                backend: CompilationBackend::LocalWithInstall {
-                    install_path: None,
-                    download_url: "https://releases.context.com/latest/context".to_string(),
-                    fallback_remote: Some("https://api.context.com/compile".to_string()),
-                },
-                auto_install: true,
-                ..Default::default()
-            };
-            Self::new_with_config(config)
+    pub fn set_live_callback(&self, callback: Option<Arc<dyn LiveUpdateCallback>>) {
+        if let Ok(mut live_callback) = self.live_callback.write() {
+            *live_callback = callback;
         }
-        #[cfg(not(all(feature = "local-install", not(target_os = "ios"), not(target_os = "android"))))]
-        {
-            panic!("new_desktop is only available on desktop platforms with local-install feature");
-        }
-    }
-    
-    #[uniffi::constructor]
-    pub fn new_mobile(api_endpoint: String) -> Self {
-        #[cfg(feature = "http-compilation")]
-        {
-            let config = CompilationConfig {
-                backend: CompilationBackend::Remote { endpoint: api_endpoint },
-                auto_install: false,
-                ..Default::default()
-            };
-            Self::new_with_config(config)
-        }
-
-        #[cfg(not(feature = "http-compilation"))]
-        {
-            panic!("new_mobile requires http-compilation feature");
-        }
-    }
-    
-    pub fn set_compilation_config(&self, config: CompilationConfig) {
-        tokio::spawn({
-            let compilation_config = self.compilation_config.clone();
-            async move {
-                *compilation_config.write().await = config;
-            }
-        });
-    }
-    
-    pub fn set_compilation_backend(&self, backend: CompilationBackend) {
-        tokio::spawn({
-            let compilation_config = self.compilation_config.clone();
-            async move {
-                compilation_config.write().await.backend = backend;
-            }
-        });
-    }
-    
-    pub fn set_auth_token(&self, token: Option<String>) {
-        tokio::spawn({
-            let compilation_config = self.compilation_config.clone();
-            async move {
-                compilation_config.write().await.auth_token = token;
-            }
-        });
-    }
-    
-    pub fn set_live_update_callback(&self, callback: Option<Arc<dyn LiveUpdateCallback>>) {
-        tokio::spawn({
-            let live_callback = self.live_callback.clone();
-            async move {
-                *live_callback.write().await = callback;
-            }
-        });
     }
     
     pub fn open(&self, uri: String, text: String) -> bool {
-        let result = {
-            let runtime = self.sync_runtime.lock().unwrap();
-            runtime.open_document(uri.clone(), text.clone()).is_ok()
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::OpenDocument { 
+            uri: uri.clone(), 
+            content: text, 
+            reply: reply_tx 
         };
         
-        if result {
-            let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri, text });
+        if self.runtime_sender.send(cmd).is_err() {
+            return false;
         }
         
-        result
+        match reply_rx.blocking_recv() {
+            Ok(Ok(())) => {
+                let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri });
+                true
+            },
+            _ => false
+        }
     }
     
-    pub fn update(&self, uri: String, text: String) -> bool {
-        let result = {
-            let runtime = self.sync_runtime.lock().unwrap();
-            runtime.open_document(uri.clone(), text.clone()).is_ok()
+    pub fn update(&self, uri: String, start: u32, end: u32, text: String) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let edit_range = (start as usize)..(end as usize);
+        let cmd = RuntimeCommand::UpdateDocument { 
+            uri: uri.clone(), 
+            edit_range, 
+            new_text: text, 
+            reply: reply_tx 
         };
         
-        let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri, text });
+        if self.runtime_sender.send(cmd).is_err() {
+            return false;
+        }
         
-        result
+        match reply_rx.blocking_recv() {
+            Ok(Ok(())) => {
+                let _ = self.task_sender.send(BackgroundTask::ParseDocument { uri });
+                true
+            },
+            _ => false
+        }
     }
     
     pub fn close(&self, uri: String) {
-        let runtime = self.sync_runtime.lock().unwrap();
-        runtime.close_document(&uri);
+        let _ = self.runtime_sender.send(RuntimeCommand::CloseDocument { uri });
     }
     
     pub fn get_document_source(&self, uri: String) -> Option<String> {
-        let runtime = self.sync_runtime.lock().unwrap();
-        runtime.get_document_source(&uri).map(|s| s.to_string())
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::GetDocumentSource { uri, reply: reply_tx };
+        
+        if self.runtime_sender.send(cmd).is_err() {
+            return None;
+        }
+        
+        reply_rx.blocking_recv().unwrap_or(None)
     }
     
     pub fn get_highlights(&self, uri: String) -> Vec<HighlightFfi> {
-        let runtime = self.sync_runtime.lock().unwrap();
-        runtime.get_highlights(&uri)
-            .into_iter()
-            .map(Into::into)
-            .collect()
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::GetHighlights { uri, reply: reply_tx };
+        
+        if self.runtime_sender.send(cmd).is_err() {
+            return Vec::new();
+        }
+        
+        match reply_rx.blocking_recv() {
+            Ok(highlights) => highlights.into_iter().map(|h| HighlightFfi {
+                range: FfiRange {
+                    start: h.range.start as u32,
+                    end: h.range.end as u32,
+                },
+                kind: h.kind.to_string(),
+            }).collect(),
+            Err(_) => Vec::new()
+        }
     }
     
     pub fn get_diagnostics(&self, uri: String) -> Vec<DiagnosticFfi> {
-        let runtime = self.sync_runtime.lock().unwrap();
-        runtime.get_diagnostics(&uri)
-            .into_iter()
-            .map(Into::into)
-            .collect()
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::GetDiagnostics { uri, reply: reply_tx };
+        
+        if self.runtime_sender.send(cmd).is_err() {
+            return Vec::new();
+        }
+        
+        match reply_rx.blocking_recv() {
+            Ok(diagnostics) => diagnostics.into_iter().map(Into::into).collect(),
+            Err(_) => Vec::new()
+        }
     }
     
-    pub fn compile(&self, uri: String) -> CompileResultFfi {
-        let runtime = self.sync_runtime.lock().unwrap();
-        runtime.compile_document(&uri).into()
-    }
-    
-    pub fn compile_async(&self, uri: String, callback: Option<Arc<dyn CompilationCallback>>) -> String {
+    pub fn compile(&self, uri: String, callback: Option<Arc<dyn CompilationCallback>>) -> String {
         let job_id = Uuid::new_v4().to_string();
         let job = CompilationJob {
             id: job_id.clone(),
-            uri: uri.clone(),
+            uri,
             callback,
         };
         
@@ -288,7 +366,6 @@ impl ContextRuntimeHandle {
         }
         
         let _ = self.task_sender.send(BackgroundTask::CompileDocument { job });
-        
         job_id
     }
     
@@ -297,49 +374,135 @@ impl ContextRuntimeHandle {
         jobs.remove(&job_id).is_some()
     }
     
-    pub fn get_active_compilations(&self) -> Vec<String> {
-        let jobs = self.active_jobs.lock().unwrap();
-        jobs.keys().cloned().collect()
+       pub fn set_context_executable(&self, path: String) {
+        let cmd = RuntimeCommand::SetContextExecutable { 
+            path: PathBuf::from(path)  // Convert String to PathBuf
+        };
+        let _ = self.runtime_sender.send(cmd);
+    }
+    
+    pub fn set_working_directory(&self, path: String) {
+        let cmd = RuntimeCommand::SetWorkingDirectory { 
+            path: PathBuf::from(path)  // Convert String to PathBuf
+        };
+        let _ = self.runtime_sender.send(cmd);
+    } 
+
+    pub fn context_executable_exists(&self) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::CheckExecutableExists { reply: reply_tx };
+        
+        if self.runtime_sender.send(cmd).is_err() {
+            return false;
+        }
+        
+        reply_rx.blocking_recv().unwrap_or(false)
+    }
+    
+    pub fn get_context_executable_path(&self) -> String {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = RuntimeCommand::GetExecutablePath { reply: reply_tx };
+        
+        if self.runtime_sender.send(cmd).is_err() {
+            return String::new();
+        }
+        
+        reply_rx.blocking_recv()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    }
+    
+    pub fn shutdown(&self) {
+        let _ = self.runtime_sender.send(RuntimeCommand::Shutdown);
+        let _ = self.task_sender.send(BackgroundTask::Shutdown);
     }
 }
 
-// Implementation of async methods (these are not exported via uniffi)
 impl ContextRuntimeHandle {
-    async fn process_parse_task(
-        runtime: Arc<Mutex<Runtime>>,
+    async fn task_worker(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<BackgroundTask>,
         live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
-        uri: String,
-        text: String,
+        active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
+        config: Arc<RwLock<CompilationConfig>>,
+        runtime_sender: mpsc::Sender<RuntimeCommand>,
+        #[cfg(feature = "http-compilation")]
+        http_client: Arc<reqwest::Client>,
     ) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        
-        let (diagnostics, highlights) = {
-            let runtime = runtime.lock().unwrap();
-            let diagnostics = runtime.get_diagnostics(&uri)
-                .into_iter()
-                .map(Into::into)
-                .collect();
-            let highlights = runtime.get_highlights(&uri)
-                .into_iter()
-                .map(Into::into)
-                .collect();
-            (diagnostics, highlights)
-        };
-        
-        if let Some(callback) = live_callback.read().await.as_ref() {
-            callback.on_diagnostics_updated(uri.clone(), diagnostics);
-            callback.on_highlights_updated(uri, highlights);
+        while let Some(task) = receiver.recv().await {
+            match task {
+                BackgroundTask::ParseDocument { uri } => {
+                    Self::process_parse_task(
+                        runtime_sender.clone(),
+                        live_callback.clone(),
+                        uri,
+                    ).await;
+                }
+                BackgroundTask::CompileDocument { job } => {
+                    Self::process_compile_task(
+                        runtime_sender.clone(),
+                        active_jobs.clone(),
+                        config.clone(),
+                        #[cfg(feature = "http-compilation")]
+                        http_client.clone(),
+                        job,
+                    ).await;
+                }
+                BackgroundTask::Shutdown => break,
+            }
         }
     }
     
+    async fn process_parse_task(
+        runtime_sender: mpsc::Sender<RuntimeCommand>,
+        live_callback: Arc<RwLock<Option<Arc<dyn LiveUpdateCallback>>>>,
+        uri: String,
+    ) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        
+        let (diag_tx, diag_rx) = oneshot::channel();
+        let (high_tx, high_rx) = oneshot::channel();
+        
+        let diag_cmd = RuntimeCommand::GetDiagnostics { 
+            uri: uri.clone(), 
+            reply: diag_tx 
+        };
+        let high_cmd = RuntimeCommand::GetHighlights { 
+            uri: uri.clone(), 
+            reply: high_tx 
+        };
+        
+        if runtime_sender.send(diag_cmd).is_ok() && runtime_sender.send(high_cmd).is_ok() {
+            let diagnostics = diag_rx.await.unwrap_or_default();
+            let highlights = high_rx.await.unwrap_or_default();
+            
+            if let Ok(callback_guard) = live_callback.read() {
+                if let Some(callback) = callback_guard.as_ref() {
+                    let diagnostics_ffi: Vec<DiagnosticFfi> = diagnostics.into_iter().map(Into::into).collect();
+                    let highlights_ffi: Vec<HighlightFfi> = highlights.into_iter().map(|h| HighlightFfi {
+                        range: FfiRange {
+                            start: h.range.start as u32,
+                            end: h.range.end as u32,
+                        },
+                        kind: h.kind.to_string(),
+                    }).collect();
+                    
+                    callback.on_diagnostics_updated(uri.clone(), diagnostics_ffi);
+                    callback.on_highlights_updated(uri, highlights_ffi);
+                }
+            }
+        }
+    } 
+
     async fn process_compile_task(
-        runtime: Arc<Mutex<Runtime>>,
+        runtime_sender: mpsc::Sender<RuntimeCommand>,
         active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
         config: Arc<RwLock<CompilationConfig>>,
         #[cfg(feature = "http-compilation")]
         http_client: Arc<reqwest::Client>,
         job: CompilationJob,
     ) {
+        // Early exit if job was cancelled
         {
             let jobs = active_jobs.lock().unwrap();
             if !jobs.contains_key(&job.id) {
@@ -347,135 +510,84 @@ impl ContextRuntimeHandle {
             }
         }
         
-        let config = config.read().await.clone();
-        
-        let result = match &config.backend {
-            CompilationBackend::Auto => {
-                if let Some(local_path) = Self::find_local_binary().await {
-                    Self::compile_local(runtime.clone(), &job.uri, &local_path).await
-                } else {
-                    #[cfg(feature = "http-compilation")]
-                    {
-                        if let Some(endpoint) = Self::get_default_remote_endpoint() {
-                            Self::compile_remote(http_client, &job.uri, &endpoint, &config).await
-                        } else {
-                            CompileResultFfi::error("No compilation backend available".to_string())
-                        }
+        let config = config.read().unwrap().clone();
+        let result = {
+            #[cfg(feature = "http-compilation")]
+            {
+                if let CompilationBackend::Remote { ref endpoint } = config.backend {
+                    match Self::do_remote_compile(
+                        http_client.clone(),
+                        &job.uri,
+                        endpoint,
+                        &config
+                    ).await {
+                        Ok(result) => result,
+                        Err(e) => CompileResultFfi::error(format!("Remote compilation failed: {}", e)),
                     }
-                    #[cfg(not(feature = "http-compilation"))]
-                    CompileResultFfi::error("Local binary not found and HTTP compilation not enabled".to_string())
-                }
-            }
-            
-            CompilationBackend::Local { path } => {
-                let binary_path = if let Some(path) = path {
-                    PathBuf::from(path)
                 } else {
-                    match Self::find_local_binary().await {
-                        Some(path) => path,
-                        None => {
-                            return Self::complete_job_with_error(
-                                active_jobs,
-                                job,
-                                "Context binary not found".to_string()
-                            ).await;
-                        }
-                    }
-                };
-                Self::compile_local(runtime.clone(), &job.uri, &binary_path).await
-            }
-            
-            CompilationBackend::Remote { endpoint } => {
-                #[cfg(feature = "http-compilation")]
-                {
-                    Self::compile_remote(http_client, &job.uri, endpoint, &config).await
-                }
-                #[cfg(not(feature = "http-compilation"))]
-                {
-                    CompileResultFfi::error("HTTP compilation not enabled".to_string())
-                }
-            }
-            
-            CompilationBackend::LocalWithInstall { install_path, download_url, fallback_remote } => {
-                #[cfg(feature = "local-install")]
-                {
-                    match Self::ensure_local_binary(install_path, download_url).await {
-                        Ok(binary_path) => {
-                            Self::compile_local(runtime.clone(), &job.uri, &binary_path).await
-                        }
-                        Err(_) => {
-                            #[cfg(feature = "http-compilation")]
-                            if let Some(remote_endpoint) = fallback_remote {
-                                Self::compile_remote(http_client, &job.uri, remote_endpoint, &config).await
+                    // Handle non-Remote cases when http-compilation is enabled
+                    match config.backend {
+                        CompilationBackend::Auto |
+                        CompilationBackend::Local { .. } |
+                        CompilationBackend::LocalWithInstall { .. } => {
+                            let (reply_tx, reply_rx) = oneshot::channel();
+                            let cmd = RuntimeCommand::CompileDocument { 
+                                uri: job.uri.clone(), 
+                                reply: reply_tx 
+                            };
+                            
+                            if runtime_sender.send(cmd).is_ok() {
+                                match reply_rx.await {
+                                    Ok(Ok(result)) => result.into(),
+                                    Ok(Err(e)) => CompileResultFfi::error(e.to_string()),
+                                    Err(_) => CompileResultFfi::error("Communication error".to_string()),
+                                }
                             } else {
-                                CompileResultFfi::error("Failed to install Context binary and no fallback remote specified".to_string())
+                                CompileResultFfi::error("Failed to send compile command".to_string())
                             }
-                            #[cfg(not(feature = "http-compilation"))]
-                            CompileResultFfi::error("Failed to install Context binary".to_string())
+                        }
+                        CompilationBackend::Remote { .. } => {
+                            // This case is already handled above
+                            unreachable!()
                         }
                     }
                 }
-                #[cfg(not(feature = "local-install"))]
-                {
-                    CompileResultFfi::error("Local installation not supported in this build".to_string())
+            }
+            
+            #[cfg(not(feature = "http-compilation"))]
+            {
+                // When http-compilation is disabled, Remote variant doesn't exist
+                match config.backend {
+                    CompilationBackend::Auto |
+                    CompilationBackend::Local { .. } |
+                    CompilationBackend::LocalWithInstall { .. } => {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let cmd = RuntimeCommand::CompileDocument { 
+                            uri: job.uri.clone(), 
+                            reply: reply_tx 
+                        };
+                        
+                        if runtime_sender.send(cmd).is_ok() {
+                            match reply_rx.await {
+                                Ok(Ok(result)) => result.into(),
+                                Ok(Err(e)) => CompileResultFfi::error(e.to_string()),
+                                Err(_) => CompileResultFfi::error("Communication error".to_string()),
+                            }
+                        } else {
+                            CompileResultFfi::error("Failed to send compile command".to_string())
+                        }
+                    }
+                    // No Remote variant exists when http-compilation feature is disabled
                 }
             }
         };
         
-        Self::complete_job(active_jobs, job, result).await;
-    } 
-
-    async fn complete_job(
-        active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
-        job: CompilationJob,
-        result: CompileResultFfi,
-    ) {
-        {
-            let mut jobs = active_jobs.lock().unwrap();
-            jobs.remove(&job.id);
-        }
-        
-        if let Some(callback) = job.callback {
+        // Remove job and notify
+        if let Some(callback) = active_jobs.lock().unwrap().remove(&job.id).and_then(|j| j.callback) {
             callback.on_compilation_complete(result);
         }
     }
-    
-    async fn complete_job_with_error(
-        active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
-        job: CompilationJob,
-        error: String,
-    ) {
-        Self::complete_job(active_jobs, job, CompileResultFfi::error(error)).await;
-    }
-    
-    async fn compile_local(
-        runtime: Arc<Mutex<Runtime>>,
-        uri: &str,
-        binary_path: &PathBuf,
-    ) -> CompileResultFfi {
-        let result = {
-            let mut runtime = runtime.lock().unwrap();
-            runtime.set_context_executable(binary_path.clone());
-            runtime.compile_document(uri)
-        };
-        result.into()
-    }
-    
-    #[cfg(feature = "http-compilation")]
-    async fn compile_remote(
-        http_client: Arc<reqwest::Client>,
-        uri: &str,
-        endpoint: &str,
-        config: &CompilationConfig,
-    ) -> CompileResultFfi {
-        // This is a placeholder - you'll need to implement the actual HTTP protocol
-        // based on your server's API
-        match Self::do_remote_compile(http_client, uri, endpoint, config).await {
-            Ok(result) => result,
-            Err(e) => CompileResultFfi::error(format!("Remote compilation failed: {}", e)),
-        }
-    }
-    
+
     #[cfg(feature = "http-compilation")]
     async fn do_remote_compile(
         http_client: Arc<reqwest::Client>,
@@ -483,10 +595,9 @@ impl ContextRuntimeHandle {
         endpoint: &str,
         config: &CompilationConfig,
     ) -> Result<CompileResultFfi, Box<dyn std::error::Error + Send + Sync>> {
-        // Placeholder implementation - customize based on your API
         let mut request = http_client
             .post(endpoint)
-            .timeout(Duration::from_secs(config.timeout_seconds))
+            .timeout(std::time::Duration::from_secs(config.timeout_seconds))
             .json(&serde_json::json!({
                 "uri": uri,
                 "action": "compile"
@@ -499,220 +610,5 @@ impl ContextRuntimeHandle {
         let response = request.send().await?;
         let result: CompileResultFfi = response.json().await?;
         Ok(result)
-    }
-    
-    // Utility methods
-    async fn find_local_binary() -> Option<PathBuf> {
-        let candidates = vec![
-            PathBuf::from("context"),
-            PathBuf::from("/usr/local/bin/context"),
-            PathBuf::from("/usr/bin/context"),
-            PathBuf::from("C:\\context\\context.exe"),
-        ];
-        
-        for path in candidates {
-            if tokio::fs::metadata(&path).await.is_ok() {
-                return Some(path);
-            }
-        }
-        
-        None
-    }
-    
-    #[cfg(feature = "local-install")]
-    async fn ensure_local_binary(
-        install_path: &Option<String>,
-        download_url: &str,
-    ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let install_dir = if let Some(path) = install_path {
-            PathBuf::from(path)
-        } else {
-            Self::default_install_path()
-        };
-        
-        let binary_path = install_dir.join(if cfg!(windows) { "context.exe" } else { "context" });
-        
-        if tokio::fs::metadata(&binary_path).await.is_ok() {
-            return Ok(binary_path);
-        }
-        
-        // Download and install
-        println!("Installing Context compiler...");
-        Self::download_and_install(download_url, &install_dir).await?;
-        
-        Ok(binary_path)
-    }
-    
-    #[cfg(feature = "local-install")]
-    fn default_install_path() -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from("C:\\context")
-        } else {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".context")
-        }
-    }
-    
-    #[cfg(feature = "local-install")]
-    async fn download_and_install(
-        download_url: &str,
-        install_dir: &PathBuf,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Placeholder implementation
-        tokio::fs::create_dir_all(install_dir).await?;
-        
-        // Download binary
-        let client = reqwest::Client::new();
-        let response = client.get(download_url).send().await?;
-        let bytes = response.bytes().await?;
-        
-        // Write to install directory
-        let binary_name = if cfg!(windows) { "context.exe" } else { "context" };
-        let binary_path = install_dir.join(binary_name);
-        tokio::fs::write(&binary_path, bytes).await?;
-        
-        // Make executable on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = tokio::fs::metadata(&binary_path).await?.permissions();
-            perms.set_mode(0o755);
-            tokio::fs::set_permissions(&binary_path, perms).await?;
-        }
-        
-        Ok(())
-    }
-    
-    #[cfg(feature = "http-compilation")]
-    fn get_default_remote_endpoint() -> Option<String> {
-        // You can set this to your default remote endpoint
-        Some("https://api.context.com/compile".to_string())
-    }
-}
-
-// FFI types
-#[derive(Debug, Clone, Default, uniffi::Record)]
-#[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
-pub struct CompileResultFfi {
-    pub success: bool,
-    pub pdf_path: Option<String>,
-    pub log: String,
-    pub errors: Vec<DiagnosticFfi>,
-    pub warnings: Vec<DiagnosticFfi>,
-}
-
-impl CompileResultFfi {
-    pub fn error(message: String) -> Self {
-        Self {
-            success: false,
-            pdf_path: None,
-            log: message.clone(),
-            errors: vec![DiagnosticFfi {
-                range: FfiRange { start: 0, end: 0 },
-                severity: "error".to_string(),
-                message,
-                source: "runtime".to_string(),
-            }],
-            warnings: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, uniffi::Record)]
-#[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
-pub struct HighlightFfi {
-    pub range: FfiRange,
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, uniffi::Record)]
-#[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
-pub struct DiagnosticFfi {
-    pub range: FfiRange,
-    pub severity: String,
-    pub message: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Copy, uniffi::Record)]
-#[cfg_attr(feature = "http-compilation", derive(serde::Serialize, serde::Deserialize))]
-pub struct FfiRange {
-    pub start: u32,
-    pub end: u32,
-}
-
-// Conversion implementations
-impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
-    fn from(result: Result<CompilationResult, RuntimeError>) -> Self {
-        match result {
-            Ok(compilation_result) => compilation_result.into(),
-            Err(error) => CompileResultFfi {
-                success: false,
-                pdf_path: None,
-                log: format!("Compilation failed: {:?}", error),
-                errors: vec![DiagnosticFfi {
-                    range: FfiRange { start: 0, end: 0 },
-                    severity: "error".to_string(),
-                    message: format!("{:?}", error),
-                    source: "runtime".to_string(),
-                }],
-                warnings: vec![],
-            }
-        }
-    }
-}
-
-impl From<Highlight> for HighlightFfi {
-    fn from(h: Highlight) -> Self {
-        HighlightFfi {
-            range: FfiRange {
-                start: h.range.start as u32,
-                end: h.range.end as u32,
-            },
-            kind: h.kind.to_string(),
-        }
-    }
-}
-
-impl From<Diagnostic> for DiagnosticFfi {
-    fn from(d: Diagnostic) -> Self {
-        DiagnosticFfi {
-            range: FfiRange {
-                start: d.span.start_byte.unwrap_or(0) as u32,
-                end: d.span.end_byte.unwrap_or(0) as u32,
-            },
-            severity: d.severity.to_string(),
-            message: d.message,
-            source: d.source,
-        }
-    }
-}
-
-impl From<CompilationResult> for CompileResultFfi {
-    fn from(result: CompilationResult) -> Self {
-        CompileResultFfi {
-            success: result.success,
-            pdf_path: result.output_path.and_then(|p| p.to_str().map(|s| s.to_string())),
-            log: result.log,
-            errors: result.errors.into_iter().map(|e| DiagnosticFfi {
-                range: FfiRange {
-                    start: e.column as u32,
-                    end: (e.column + 1) as u32,
-                },
-                severity: "error".to_string(),
-                message: e.message,
-                source: e.file,
-            }).collect(),
-            warnings: result.warnings.into_iter().map(|w| DiagnosticFfi {
-                range: FfiRange {
-                    start: w.column as u32,
-                    end: (w.column + 1) as u32,
-                },
-                severity: "warning".to_string(),
-                message: w.message,
-                source: w.file,
-            }).collect(),
-        }
     }
 }

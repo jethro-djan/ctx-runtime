@@ -1,8 +1,9 @@
 use serde::{Serialize, Deserialize};
+use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
-    pub span: SourceSpan,
+    pub range: Range<usize>,
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub source: String,
@@ -25,58 +26,22 @@ impl DiagnosticSeverity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceSpan {
-    pub start_line: u32,
-    pub start_col: u32,
-    pub end_line: u32,
-    pub end_col: u32,
-    pub start_byte: Option<u32>,
-    pub end_byte: Option<u32>,
-}
-
 impl Diagnostic {
-    pub fn error(
-        line: u32,
-        column: u32,
-        length: u32,
-        message: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
+    pub fn error(start: usize, length: usize, message: String, source: String) -> Self {
         Self {
-            span: SourceSpan {
-                start_line: line,
-                start_col: column,
-                end_line: line,
-                end_col: column + length,
-                start_byte: None,
-                end_byte: None,
-            },
-            severity: DiagnosticSeverity::Error,
-            message: message.into(),
-            source: source.into(),
+            range: start..(start + length),
+            severity: DiagnosticSeverity::Error,  // Use the enum variant directly
+            message,
+            source,
         }
     }
 
-    pub fn warning(
-        line: u32,
-        column: u32,
-        length: u32,
-        message: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
+    pub fn warning(start: usize, length: usize, message: String, source: String) -> Self {
         Self {
-            span: SourceSpan {
-                start_line: line,
-                start_col: column,
-                end_line: line,
-                end_col: column + length,
-                start_byte: None,
-                end_byte: None,
-            },
-            severity: DiagnosticSeverity::Warning,
-            message: message.into(),
-            source: source.into(),
+            range: start..(start + length),
+            severity: DiagnosticSeverity::Warning,  // Use the enum variant directly
+            message,
+            source,
         }
     }
 }

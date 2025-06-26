@@ -1,10 +1,14 @@
 pub mod parser;
 pub mod highlight;
-pub mod ast;
 pub mod runtime;
 pub mod ffi;
 pub mod diagnostic;
+pub mod lexer;
+pub mod syntax;
+pub mod ffi_types;
+pub mod conversions;
 
+// pub use ffi_types::*;
 
 
 uniffi::setup_scaffolding!();
