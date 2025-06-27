@@ -105,6 +105,7 @@ pub struct CompilationConfig {
     pub backend: CompilationBackend,
     pub timeout_seconds: u64,
     pub auth_token: Option<String>,
+    pub remote_headers: Option<HashMap<String, String>>,
 }
 
 #[derive(uniffi::Enum, Debug, Clone)]
@@ -122,12 +123,25 @@ pub enum CompilationBackend {
     },
 }
 
+impl CompilationBackend {
+    #[cfg(feature = "http-compilation")]
+    pub fn is_remote(&self) -> bool {
+        matches!(self, CompilationBackend::Remote { .. })
+    }
+
+    #[cfg(not(feature = "http-compilation"))]
+    pub fn is_remote(&self) -> bool {
+        false
+    }
+}
+
 impl Default for CompilationConfig {
     fn default() -> Self {
         Self {
             backend: CompilationBackend::Auto,
             timeout_seconds: 60,
             auth_token: None,
+            remote_headers: None,
         }
     }
 }
@@ -155,12 +169,48 @@ impl ContextRuntimeHandle {
     
     #[uniffi::constructor]
     pub fn new_with_config(config: CompilationConfig) -> Self {
+        let resolved_config = match config.backend {
+            CompilationBackend::Auto => {
+                #[cfg(target_os = "ios")]
+                {
+                    #[cfg(feature = "http-compilation")]
+                    {
+                        CompilationConfig {
+                            backend: CompilationBackend::Remote {
+                                endpoint: "https://default-ios-endpoint".to_string(),
+                            },
+                            timeout_seconds: config.timeout_seconds,
+                            auth_token: config.auth_token,
+                            remote_headers: config.remote_headers,
+                        }
+                    }
+                    #[cfg(not(feature = "http-compilation"))]
+                    {
+                        panic!("HTTP compilation required on iOS");
+                    }
+                }
+                #[cfg(not(target_os = "ios"))]
+                {
+                    CompilationConfig {
+                        backend: CompilationBackend::Local { executable_path: None },
+                        ..config
+                    }
+                }
+            }
+            _ => CompilationConfig {
+                backend: config.backend,
+                timeout_seconds: config.timeout_seconds,
+                auth_token: config.auth_token,
+                remote_headers: config.remote_headers,
+            },
+        };
+
         let (runtime_sender, runtime_receiver) = mpsc::channel::<RuntimeCommand>();
         let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel::<BackgroundTask>();
         
         let live_callback = Arc::new(RwLock::new(None));
         let active_jobs = Arc::new(Mutex::new(HashMap::new()));
-        let compilation_config = Arc::new(RwLock::new(config));
+        let compilation_config = Arc::new(RwLock::new(resolved_config.clone()));
         
         #[cfg(feature = "http-compilation")]
         let http_client = Arc::new(
@@ -247,7 +297,7 @@ impl ContextRuntimeHandle {
             _runtime_thread: runtime_thread,
             live_callback,
             active_jobs,
-            compilation_config,
+            compilation_config: Arc::new(RwLock::new(resolved_config)),
             #[cfg(feature = "http-compilation")]
             http_client,
         }
@@ -514,15 +564,15 @@ impl ContextRuntimeHandle {
         let result = {
             #[cfg(feature = "http-compilation")]
             {
-                if let CompilationBackend::Remote { ref endpoint } = config.backend {
+                if config.backend.is_remote() {
                     match Self::do_remote_compile(
+                        #[cfg(feature = "http-compilation")]
                         http_client.clone(),
                         &job.uri,
-                        endpoint,
                         &config
                     ).await {
                         Ok(result) => result,
-                        Err(e) => CompileResultFfi::error(format!("Remote compilation failed: {}", e)),
+                        Err(e) => CompileResultFfi::error(format!("Remote error: {}", e)),
                     }
                 } else {
                     // Handle non-Remote cases when http-compilation is enabled
@@ -595,6 +645,12 @@ impl ContextRuntimeHandle {
         endpoint: &str,
         config: &CompilationConfig,
     ) -> Result<CompileResultFfi, Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = if let CompilationBackend::Remote { endpoint } = &config.backend {
+            endpoint
+        } else {
+            return Err("Not a remote backend".into());
+        };
+
         let mut request = http_client
             .post(endpoint)
             .timeout(std::time::Duration::from_secs(config.timeout_seconds))
@@ -606,9 +662,70 @@ impl ContextRuntimeHandle {
         if let Some(token) = &config.auth_token {
             request = request.bearer_auth(token);
         }
+
+        if let Some(headers) = &config.remote_headers {
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+        }
         
         let response = request.send().await?;
         let result: CompileResultFfi = response.json().await?;
         Ok(result)
+    }
+}
+
+#[cfg(feature = "http-compilation")]
+pub struct RemoteBackend {
+    client: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+}
+
+#[cfg(feature = "http-compilation")]
+impl RemoteBackend {
+    pub fn new(endpoint: String, api_key: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            endpoint,
+            api_key,
+        }
+    }
+
+    pub async fn compile(
+        &self,
+        uri: &str,
+        content: &str,
+    ) -> Result<CompileResultFfi, RuntimeError> {
+        let response = self.client
+            .post(&self.endpoint)
+            .header("x-api-key", &self.api_key)
+            .json(&CompileRequest {
+                content: content.to_string(),
+                format: Some("pdf".to_string()),
+            })
+            .send()
+            .await
+            .map_err(|e| RuntimeError::BackendError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(RuntimeError::BackendError(error));
+        }
+
+        let result: CompileResponse = response.json()
+            .await
+            .map_err(|e| RuntimeError::BackendError(e.to_string()))?;
+
+        Ok(CompileResultFfi {
+            success: result.success,
+            log: result.log,
+            output_path: result.output_url.unwrap_or_default(),
+            diagnostics: result.diagnostics.into_iter().map(|d| DiagnosticFfi {
+                message: d.message,
+                severity: d.severity,
+                range: None,
+            }).collect(),
+        })
     }
 }
