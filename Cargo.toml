@@ -8,29 +8,28 @@ crate-type = ["staticlib", "lib"]
 name = "context_runtime"
 
 [dependencies]
+async-trait = "0.1.88"
+bumpalo = "3.19.0"
+dirs = "5.0"
+env_logger = "0.11"
 log = "0.4.27"
+logos = "0.15.0"
 nom = { version = "8.0.0", features = ["alloc"] }
 nom_locate = "5.0.0"
 pretty_assertions = "1.4.1"
+regex = "1.11.1"
+reqwest = { version = "0.12", features = ["json"] }
+rowan = "0.16.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-smol_str = "0.3.2"
+tempfile = "3"
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["full"] }
 uniffi = { version = "0.29.3", features = ["cli"] }
-which = "8.0.0"
-tempfile = "3"
-
 uuid = { version = "1.0", features = ["v4"] }
-
-reqwest = { version = "0.12", features = ["json"], optional = true }
-
-zip = { version = "0.6", optional = true }
-tar = { version = "0.4", optional = true }
-dirs = { version = "5.0", optional = true }
-bumpalo = "3.19.0"
-logos = "0.15.0"
-rowan = "0.16.1"
+which = "8.0.0"
+zip = "0.6"
+tar = "0.4"
 
 [build-dependencies]
 uniffi = { version = "0.29", features = ["build"] }
@@ -38,23 +37,3 @@ uniffi = { version = "0.29", features = ["build"] }
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 utilities = { path = "utilities" }
-env_logger = "0.11"
-log = "0.4"
-
-[features]
-default = ["local-only"]
-
-http-compilation = ["reqwest", "tokio/full"]
-
-local-install = ["zip", "tar", "dirs"]
-
-full = ["http-compilation", "local-install"]
-
-ffi-trace = ["uniffi/ffi-trace"]
-
-local-only = []
-
-desktop = ["local-install"]
-mobile = ["http-compilation"]
-
-test-utils = []
