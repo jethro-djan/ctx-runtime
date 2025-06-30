@@ -169,7 +169,6 @@ impl ContextRuntime {
                                 name_token.text_range().start().into(),
                                 name_token.text_range().len().into(),
                                 format!("Unknown command: \\{}", name),
-                                "parser".to_string(),
                             ));
                         }
                     }
@@ -182,7 +181,6 @@ impl ContextRuntime {
                                 name_token.text_range().start().into(),
                                 name_token.text_range().len().into(),
                                 format!("Unknown environment: {}", name),
-                                "parser".to_string(),
                             ));
                         }
                     }
@@ -193,7 +191,6 @@ impl ContextRuntime {
                             token.text_range().start().into(),
                             token.text_range().len().into(),
                             "Syntax error".to_string(),
-                            "parser".to_string(),
                         ));
                     }
                 }
@@ -260,7 +257,7 @@ impl ContextRuntime {
         let diagnostics = diag_map.entry(uri.to_string())
             .or_default();
         
-        diagnostics.retain(|d| d.source != "compiler");
+        diagnostics.retain(|d| d.message != "compiler");
         
         if let Some(document) = self.documents.read().unwrap().get(uri) {
             for error in &result.errors {
@@ -269,7 +266,6 @@ impl ContextRuntime {
                         offset,
                         1,
                         error.message.clone(),
-                        "compiler".to_string(),
                     ));
                 }
             }
@@ -280,7 +276,6 @@ impl ContextRuntime {
                         offset,
                         1, 
                         warning.message.clone(),
-                        "compiler".to_string(),
                     ));
                 }
             }

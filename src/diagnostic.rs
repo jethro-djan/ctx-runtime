@@ -29,7 +29,7 @@ impl Diagnostic {
     pub fn error(start: usize, length: usize, message: String) -> Self {
         Self {
             range: start..(start + length),
-            severity: DiagnosticSeverity::Error,  // Use the enum variant directly
+            severity: DiagnosticSeverity::Error, 
             message,
         }
     }
@@ -37,7 +37,7 @@ impl Diagnostic {
     pub fn warning(start: usize, length: usize, message: String) -> Self {
         Self {
             range: start..(start + length),
-            severity: DiagnosticSeverity::Warning,  // Use the enum variant directly
+            severity: DiagnosticSeverity::Warning, 
             message,
         }
     }
