@@ -1,6 +1,5 @@
 use bumpalo::Bump;
 use rowan::{GreenNode, GreenNodeBuilder, Language, SyntaxNode as RowanSyntaxNode, SyntaxToken as RowanSyntaxToken};
-use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConTeXtLanguage {}

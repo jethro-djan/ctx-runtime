@@ -1,6 +1,6 @@
 use crate::backend_traits::CompilationResult;
 use crate::runtime::{RuntimeError, RuntimeConfig};
-use crate::diagnostic::{Diagnostic, DiagnosticSeverity};
+use crate::diagnostic::Diagnostic;
 use crate::highlight::Highlight;
 use rowan::TextRange;
 use std::path::PathBuf;

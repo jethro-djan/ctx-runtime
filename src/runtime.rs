@@ -1,10 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
-use std::ops::Range;
-use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use bumpalo::Bump;
-use async_trait::async_trait;
 use crate::{
     highlight::{Highlight, highlight},
     diagnostic::Diagnostic,
@@ -21,7 +18,7 @@ pub struct ContextRuntime {
     diagnostics: RwLock<HashMap<String, Vec<Diagnostic>>>,
 }
 
-struct Document {
+pub struct Document {
     source: String,
     syntax_tree: SyntaxTree,
     arena: Box<Bump>,

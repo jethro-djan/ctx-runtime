@@ -1,19 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::ops::Range;
-use uuid::Uuid;
-use std::thread;
 use std::sync::{Arc, RwLock, Mutex};
 
-use crate::backend_traits::*;
-use crate::runtime::{ContextRuntime, RuntimeError, RuntimeConfig};
-use crate::highlight::Highlight;
-use crate::diagnostic::Diagnostic;
+use crate::runtime::ContextRuntime;
 use crate::ffi_bridge::*;
 
-use std::sync::mpsc;
-use tokio::sync::oneshot;
-use uniffi::{self, Object};
+use uniffi::{self};
 
 // Document state that we can safely store (without the problematic Bump allocator)
 #[derive(Debug, Clone)]
