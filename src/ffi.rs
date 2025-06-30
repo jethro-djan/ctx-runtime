@@ -426,7 +426,6 @@ impl AsyncCompilationFuture {
     }
 }
 
-#[uniffi::export]
 impl AsyncCompilationFuture {
     pub fn poll_result(&self) -> Option<CompileResultFfi> {
         if self.is_ready() {
@@ -446,6 +445,7 @@ impl AsyncCompilationFuture {
     }
 }
 
+#[uniffi::export]
 impl ContextRuntimeHandle {
     pub fn compile_async(&self, uri: String) -> Option<Arc<AsyncCompilationFuture>> {
         let content = self.get_document_source(uri.clone())?;
