@@ -426,6 +426,7 @@ impl AsyncCompilationFuture {
     }
 }
 
+#[uniffi::export]
 impl AsyncCompilationFuture {
     pub fn poll_result(&self) -> Option<CompileResultFfi> {
         if self.is_ready() {
