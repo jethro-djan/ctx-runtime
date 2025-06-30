@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::ops::Range;
 use std::io::Write;
 use bumpalo::Bump;
@@ -13,14 +13,12 @@ use crate::{
 };
 
 use crate::backend_traits::*;
-use crate::runtime_config::*;
 
 pub struct ContextRuntime {
-    backend: Mutex<Arc<dyn CompilationBackend>>,
+    backend: Arc<RwLock<Box<dyn CompilationBackend>>>,
     config: RuntimeConfig,
-    documents: Mutex<HashMap<String, Document>>,
-    diagnostics: Mutex<HashMap<String, Vec<Diagnostic>>>,
-    active_compilations: Mutex<HashMap<String, CompilationJob>>,
+    documents: RwLock<HashMap<String, Document>>,
+    diagnostics: RwLock<HashMap<String, Vec<Diagnostic>>>,
 }
 
 struct Document {
@@ -29,41 +27,60 @@ struct Document {
     arena: Box<Bump>,
 }
 
-#[derive(Clone)]
-struct CompilationJob {
-    id: String,
-    uri: String,
-    backend_id: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub remote: bool,
+    pub server_url: Option<String>,
+    pub auth_token: Option<String>,
+    pub local_executable: Option<PathBuf>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            remote: true,
+            server_url: None,
+            auth_token: None,
+            local_executable: None,
+        }
+    }
 }
 
 impl ContextRuntime {
     pub fn new(config: RuntimeConfig) -> Arc<Self> {
-        let backend: Arc<dyn CompilationBackend> = if config.is_mobile() {
-            let remote_backend = RemoteBackend::new(
-                config.remote_endpoint.clone().expect("Mobile requires remote endpoint"), 
-                config.auth_token.clone()
-            );
-            Arc::new(remote_backend)
+        let backend = Self::create_backend(&config);
+
+        Arc::new(Self {
+            backend: Arc::new(RwLock::new(backend)),
+            config,
+            documents: RwLock::new(HashMap::new()),
+            diagnostics: RwLock::new(HashMap::new()),
+        })
+    }
+
+    fn create_backend(config: &RuntimeConfig) -> Box<dyn CompilationBackend> {
+        if config.remote {
+            Box::new(RemoteBackend::new(
+                config.server_url.clone().unwrap_or_default(),
+                config.auth_token.clone(),
+            ))
         } else {
             let local_backend = LocalBackend::new(config.local_executable.clone())
                 .expect("Failed to create local backend");
-            Arc::new(local_backend)
-        };
+            Box::new(local_backend)
+        }
+    }
 
-        Arc::new(Self {
-            backend: Mutex::new(backend),
-            config,    
-            documents: Mutex::new(HashMap::new()),
-            diagnostics: Mutex::new(HashMap::new()),
-            active_compilations: Mutex::new(HashMap::new()),
-        })
+    pub fn set_backend(&self, backend: Box<dyn CompilationBackend>) {
+        let mut write_guard = self.backend.write().unwrap();
+        *write_guard = backend;
     }
 
     pub fn with_document<F, R>(&self, uri: &str, f: F) -> Option<R>
     where
         F: FnOnce(&Document) -> R
     {
-        let docs = self.documents.lock().ok()?;
+        let docs = self.documents.read().ok()?;
         docs.get(uri).map(f)
     }
 
@@ -77,7 +94,7 @@ impl ContextRuntime {
             arena,
         };
 
-        self.documents.lock()
+        self.documents.write()
             .map_err(|_| RuntimeError::LockPoisoned)?
             .insert(uri.clone(), document);
 
@@ -91,7 +108,7 @@ impl ContextRuntime {
         edit_range: std::ops::Range<usize>,
         new_text: &str,
     ) -> Result<(), RuntimeError> {
-        let mut documents = self.documents.lock()
+        let mut documents = self.documents.write()
             .map_err(|_| RuntimeError::LockPoisoned)?;
 
         if let Some(document) = documents.get_mut(uri) {
@@ -110,8 +127,8 @@ impl ContextRuntime {
     }
 
     pub fn close_document(&self, uri: &str) {
-        self.documents.lock().unwrap().remove(uri);
-        self.diagnostics.lock().unwrap().remove(uri);
+        self.documents.write().unwrap().remove(uri);
+        self.diagnostics.write().unwrap().remove(uri);
     }
 
     pub fn get_highlights(&self, uri: &str) -> Vec<Highlight> {
@@ -124,7 +141,7 @@ impl ContextRuntime {
     }
 
     pub fn get_diagnostics(&self, uri: &str) -> Vec<Diagnostic> {
-        self.diagnostics.lock()
+        self.diagnostics.read()
             .ok()
             .and_then(|diags| diags.get(uri).cloned())
             .unwrap_or_default()
@@ -133,11 +150,11 @@ impl ContextRuntime {
     fn update_diagnostics(&self, uri: &str) -> Result<(), RuntimeError> {
         let mut diagnostics = Vec::new();
         
-        if let Some(doc) = self.documents.lock().unwrap().get(uri) {
+        if let Some(doc) = self.documents.read().unwrap().get(uri) {
             self.collect_syntax_diagnostics(&doc.syntax_tree, &mut diagnostics);
         }
         
-        let mut diag_map = self.diagnostics.lock()
+        let mut diag_map = self.diagnostics.write()
             .map_err(|_| RuntimeError::LockPoisoned)?;
         diag_map.insert(uri.to_string(), diagnostics);
         
@@ -210,23 +227,13 @@ impl ContextRuntime {
         )
     }
 
-    fn create_backend(config: &RuntimeConfig) -> Arc<dyn CompilationBackend> {
-        if config.is_mobile() {
-            Arc::new(RemoteBackend::new(
-                config.remote_endpoint.clone().expect("Mobile requires remote endpoint"),
-                config.auth_token.clone(),
-            ))
-        } else {
-            let local_backend = LocalBackend::new(config.local_executable.clone())
-                .expect("Failed to create local backend");
-            Arc::new(local_backend)
-        }
-    }
-
     pub async fn compile_document(&self, uri: &str) -> Result<CompilationResult, RuntimeError> {
         let content = self.get_document_source(uri)
             .ok_or(RuntimeError::DocumentNotFound(uri.to_string()))?;
-        let backend = self.backend.lock().unwrap().clone();
+
+        let backend_guard = self.backend.read().map_err(|_| RuntimeError::LockPoisoned)?;
+        let backend = backend_guard.as_ref();
+
         let result = backend.compile(CompilationRequest {
             content,
             job_id: uri.to_string(),
@@ -250,7 +257,7 @@ impl ContextRuntime {
         uri: &str, 
         result: &CompilationResult
     ) -> Result<(), RuntimeError> {
-        let mut diag_map = self.diagnostics.lock()
+        let mut diag_map = self.diagnostics.write()
             .map_err(|_| RuntimeError::LockPoisoned)?;
         
         let diagnostics = diag_map.entry(uri.to_string())
@@ -258,7 +265,7 @@ impl ContextRuntime {
         
         diagnostics.retain(|d| d.source != "compiler");
         
-        if let Some(document) = self.documents.lock().unwrap().get(uri) {
+        if let Some(document) = self.documents.read().unwrap().get(uri) {
             for error in &result.errors {
                 if let Some(offset) = self.line_column_to_offset(&document.source, error.line, error.column) {
                     diagnostics.push(Diagnostic::error(
@@ -320,6 +327,3 @@ pub enum RuntimeError {
     #[error("Document not found: {0}")]
     DocumentNotFound(String),
 }
-
-
-

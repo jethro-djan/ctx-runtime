@@ -5,10 +5,8 @@ pub mod ffi;
 pub mod diagnostic;
 pub mod lexer;
 pub mod syntax;
-pub mod ffi_types;
-pub mod conversions;
+pub mod ffi_bridge;
 pub mod backend_traits;
-pub mod runtime_config;
 
 // pub use ffi_types::*;
 
