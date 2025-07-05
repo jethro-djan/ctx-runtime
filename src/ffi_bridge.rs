@@ -194,8 +194,8 @@ impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
                 pdf_path: None,
                 log: format!("Compilation failed: {:?}", error),
                 diagnostics: vec![DiagnosticFfi {
-                    start: 0,
-                    end: 0,
+                    start: Some(0),
+                    end: Some(0),
                     severity: "error".to_string(),
                     message: format!("{:?}", error),
                 }],
@@ -264,8 +264,8 @@ impl CompileResultFfi {
             pdf_path: None,
             log: message.clone(),
             diagnostics: vec![DiagnosticFfi {
-                start: 0,
-                end: 0,
+                start: Some(0),
+                end: Some(0),
                 severity: "error".to_string(),
                 message,
             }],

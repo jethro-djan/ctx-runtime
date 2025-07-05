@@ -186,7 +186,9 @@ impl ContextRuntimeHandle {
     }
 
     pub fn compile(&self, uri: String) -> String {
+        // Create job_id first and clone it for the async block
         let job_id = format!("compile_{}", uuid::Uuid::new_v4());
+        let job_id_for_async = job_id.clone();  // Clone for the async block
         
         let content = match self.get_document_source(uri.clone()) {
             Some(content) => content,
@@ -206,123 +208,53 @@ impl ContextRuntimeHandle {
             jobs.insert(job_id.clone(), job.clone());
         }
 
-        let job_id_clone = job_id.clone();
+        // Clone all necessary Arc references
         let active_jobs = Arc::clone(&self.active_jobs);
-        let live_callback_clone = Arc::clone(&self.live_callback);
-        let config_clone = self.config.clone();
+        let live_callback = Arc::clone(&self.live_callback);
+        let config = self.config.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
 
-        self.tokio_runtime.spawn_blocking(move || {
-            println!("Starting compilation job {} for URI: {}", job_id_clone, job.uri);
-            
-            let ffi_result = if config_clone.remote {
-                println!("Performing remote compilation");
-                let server_url = config_clone.server_url.clone().unwrap_or_default();
-                let auth_token = config_clone.auth_token.clone();
-                let request_body = CompileRequestFfi {
-                    uri: uri.clone(),        
-                    content: content.clone(),
-                    format: Some("pdf".to_string()),
-                };
+        // Spawn the async task using the cloned job_id_for_async
+        self.tokio_runtime.spawn(async move {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
 
-                println!("Sending request to: {}/compile", server_url);
-                println!("Request body: uri={}, content_length={}", request_body.uri, request_body.content.len());
+            println!("Starting async compilation for job: {}", job_id_for_async);
 
-                let client = reqwest::blocking::Client::new();
-                let mut request = client.post(&format!("{}/compile", server_url))
-                    .header("Content-Type", "application/json")
-                    .json(&request_body)
-                    .timeout(std::time::Duration::from_secs(30));
-
-                if let Some(token) = auth_token {
-                    request = request.bearer_auth(token);
-                    println!("Using authentication token");
-                }
-
-                match request.send() {
-                    Ok(response) => {
-                        let status = response.status();
-                        println!("Received response with status: {}", status);
-                        
-                        if status.is_success() {
-                            match response.json::<CompileResultFfi>().await {
-                                Ok(mut result) => {
-                                    // Ensure all diagnostics have valid ranges
-                                    result.diagnostics = result.diagnostics
-                                        .into_iter()
-                                        .map(|d| d.with_default_range())
-                                        .collect();
-                                    result
-                                },
-                                Err(e) => {
-                                    let error_msg = format!("Failed to parse remote async compilation response: {}", e);
-                                    println!("{}", error_msg);
-                                    CompileResultFfi::error(error_msg)
-                                }
-                            }
-                        } else {
-                            // Try to get error details from response body
-                            let error_details = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-                            let error_msg = format!("Remote compilation failed with status: {} - {}", status, error_details);
-                            println!("{}", error_msg);
-                            CompileResultFfi::error(error_msg)
-                        }
-                    },
+            let ffi_result = if config.remote {
+                match perform_remote_compilation(&config, &job.uri, &job.content).await {
+                    Ok(result) => result,
                     Err(e) => {
-                        let error_msg = format!("Failed to send remote compilation request: {}", e);
-                        println!("{}", error_msg);
-                        CompileResultFfi::error(error_msg)
-                    },
+                        println!("Remote compilation failed: {}", e);
+                        CompileResultFfi::error(e)
+                    }
                 }
             } else {
-                println!("Performing local compilation");
-                let runtime = ContextRuntime::new(job.config.into());
-                let compilation_result = runtime.open_document(job.uri.clone(), job.content)
-                    .and_then(|_| {
-                        let rt_inner = tokio::runtime::Runtime::new()
-                            .expect("Failed to create tokio runtime for local compilation");
-                        rt_inner.block_on(runtime.compile_document(&job.uri))
-                    });
-
-                match compilation_result {
-                    Ok(res) => {
-                        println!("Local compilation successful");
-                        res.into()
-                    },
+                match perform_local_compilation(&job).await {
+                    Ok(result) => result,
                     Err(e) => {
-                        let error_msg = format!("Local compilation failed: {}", e);
-                        println!("{}", error_msg);
-                        CompileResultFfi {
-                            success: false,
-                            pdf_path: None,
-                            log: error_msg.clone(),
-                            diagnostics: vec![DiagnosticFfi {
-                                start: 0,
-                                end: 0,
-                                severity: "error".to_string(),
-                                message: error_msg,
-                            }],
-                        }
+                        println!("Local compilation failed: {}", e);
+                        CompileResultFfi::error(e)
                     }
                 }
             };
 
-            println!("Compilation completed for job {}: success={}", job_id_clone, ffi_result.success);
+            println!("Compilation completed for job {}: success={}", job_id_for_async, ffi_result.success);
 
-            // Clean up job
+            // Clean up job using the cloned ID
             if let Ok(mut jobs) = active_jobs.lock() {
-                jobs.remove(&job_id_clone);
+                jobs.remove(&job_id_for_async);
             }
             
-            // Notify callback
-            if let Ok(cb) = live_callback_clone.read() {
+            if let Ok(cb) = live_callback.read() {
                 if let Some(callback) = &*cb {
-                    callback.on_compilation_completed(job.uri, ffi_result);
-                } else {
-                    println!("No live callback registered");
+                    callback.on_compilation_completed(job.uri.clone(), ffi_result);
                 }
             }
         });
 
+        // Return the original job_id
         job_id
     }
 
@@ -376,6 +308,73 @@ impl ContextRuntimeHandle {
             }
         }
     }
+}
+
+
+async fn perform_remote_compilation(
+    config: &RuntimeConfigFfi,
+    uri: &str,
+    content: &str,
+) -> Result<CompileResultFfi, String> {
+    let server_url = config.server_url.as_ref().ok_or("No server URL configured")?;
+    let request_body = CompileRequestFfi {
+        uri: uri.to_string(),
+        content: content.to_string(),
+        format: Some("pdf".to_string()),
+    };
+
+    println!("Sending async request to: {}/compile", server_url);
+    println!("Request body: uri={}, content_length={}", request_body.uri, request_body.content.len());
+
+    let client = reqwest::Client::new();
+    let mut request = client.post(&format!("{}/compile", server_url))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(std::time::Duration::from_secs(30));
+
+    if let Some(token) = &config.auth_token {
+        request = request.bearer_auth(token);
+        println!("Using authentication token for async request");
+    }
+
+    let response = request.send().await.map_err(|e| format!("Failed to send request: {}", e))?;
+    let status = response.status();
+    
+    if !status.is_success() {
+        let error_details = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Server error: {} - {}", status, error_details));
+    }
+
+    let mut result = response.json::<CompileResultFfi>().await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    // Ensure all diagnostics have valid ranges
+    result.diagnostics = result.diagnostics.into_iter().map(|d| {
+        DiagnosticFfi {
+            start: d.start.or(Some(0)),
+            end: d.end.or(Some(0)),
+            ..d
+        }
+    }).collect();
+
+    Ok(result)
+}
+
+async fn perform_local_compilation(job: &CompilationJob) -> Result<CompileResultFfi, String> {
+    println!("Performing local compilation");
+    let runtime = ContextRuntime::new(job.config.clone().into());
+    
+    runtime.open_document(job.uri.clone(), job.content.clone())
+        .map_err(|e| format!("Failed to open document: {}", e))?;
+
+    let rt_inner = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+    let result = rt_inner.block_on(runtime.compile_document(&job.uri))
+        .map_err(|e| format!("Compilation failed: {}", e))?;
+
+    println!("Local compilation successful");
+    Ok(result.into())
 }
 
 // Async compilation future
@@ -487,8 +486,8 @@ impl AsyncCompilationFuture {
                             pdf_path: None,
                             log: error_msg.clone(),
                             diagnostics: vec![DiagnosticFfi {
-                                start: 0,
-                                end: 0,
+                                start: Some(0),
+                                end: Some(0),
                                 severity: "error".to_string(),
                                 message: error_msg,
                             }],
@@ -502,8 +501,8 @@ impl AsyncCompilationFuture {
                             pdf_path: None,
                             log: error_msg.clone(),
                             diagnostics: vec![DiagnosticFfi {
-                                start: 0,
-                                end: 0,
+                                start: Some(0),
+                                end: Some(0),
                                 severity: "error".to_string(),
                                 message: error_msg,
                             }],
