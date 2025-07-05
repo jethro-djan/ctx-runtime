@@ -360,20 +360,23 @@ async fn perform_remote_compilation(
     let mut result = response.json::<CompileResultFfi>().await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
     if let Some(pdf_path) = result.pdf_path.take() {
-        // Handle empty server URL case
-        let server_url = config.server_url.as_deref().unwrap_or("").trim_end_matches('/');
-        let pdf_path = pdf_path.trim_start_matches('/');
-
-        // Create new String for the final URL
-        let full_url = if server_url.is_empty() {
-            pdf_path.to_string()
+        println!("Original PDF path from server: {}", pdf_path);
+        
+    let final_url = if pdf_path.starts_with("http://") || pdf_path.starts_with("https://") {
+            println!("Server returned complete URL");
+            pdf_path
         } else {
-            format!("{}/{}", server_url, pdf_path)
+            let server_url = config.server_url.as_deref().unwrap_or("").trim_end_matches('/');
+            let pdf_path_trimmed = pdf_path.trim_start_matches('/');
+            let constructed_url = format!("{}/{}", server_url, pdf_path_trimmed);
+            println!("Constructed URL from relative path: {}", constructed_url);
+            constructed_url
         };
-
-        println!("Final PDF URL: {}", full_url);
-        result.pdf_path = Some(full_url);
+        
+        println!("Final PDF URL: {}", final_url);
+        result.pdf_path = Some(final_url);
     }
+
     // Ensure all diagnostics have valid ranges
     result.diagnostics = result.diagnostics.into_iter().map(|d| {
         DiagnosticFfi {
@@ -487,6 +490,7 @@ impl AsyncCompilationFuture {
                                         };
                                         result.pdf_path = Some(full_url);
                                     }
+
                                     result.diagnostics = result.diagnostics.into_iter().map(|d| {
                                         DiagnosticFfi {
                                             // FIX 1: Use `start`, `end`, and `severity`
