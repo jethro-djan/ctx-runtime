@@ -363,7 +363,8 @@ pub struct AsyncCompilationFuture {
 }
 
 impl AsyncCompilationFuture {
-    fn new(config: RuntimeConfigFfi, uri: String, content: String) -> Self {
+    // Modified signature to accept tokio_runtime
+    fn new(tokio_runtime: Arc<tokio::runtime::Runtime>, config: RuntimeConfigFfi, uri: String, content: String) -> Self {
         let result = Arc::new(Mutex::new(None));
         let ready = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -372,10 +373,8 @@ impl AsyncCompilationFuture {
         let ready_clone = Arc::clone(&ready);
         let cancelled_clone = Arc::clone(&cancelled);
 
-        // Use spawn_blocking for operations that might involve non-Send/Sync types or
-        // a lot of synchronous work, such as the ContextRuntime's internal workings.
-        // Remote compilation can be direct async.
-        tokio::spawn(async move {
+        // Use the passed tokio_runtime for spawning
+        tokio_runtime.spawn(async move {
             if cancelled_clone.load(Ordering::Relaxed) {
                 return;
             }
@@ -499,7 +498,8 @@ impl AsyncCompilationFuture {
 impl ContextRuntimeHandle {
     pub fn compile_async(&self, uri: String) -> Option<Arc<AsyncCompilationFuture>> {
         let content = self.get_document_source(uri.clone())?;
-        let future = AsyncCompilationFuture::new(self.config.clone(), uri, content);
+        // Pass self.tokio_runtime to AsyncCompilationFuture::new
+        let future = AsyncCompilationFuture::new(self.tokio_runtime.clone(), self.config.clone(), uri, content);
         Some(Arc::new(future))
     }
 }
