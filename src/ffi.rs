@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::runtime::ContextRuntime;
-use crate::ffi_bridge::*;
+use crate::ffi_bridge::*; // This import is crucial for your FFI types like HighlightFfi, DiagnosticFfi, CompileResultFfi, etc.
 
 use uniffi::{self};
 
@@ -36,9 +36,10 @@ struct CompilationJob {
 pub struct ContextRuntimeHandle {
     config: RuntimeConfigFfi,
     documents: RwLock<HashMap<String, DocumentState>>,
+    // FIX 2: Correct type for the callback storage
     live_callback: Arc<RwLock<Option<Box<dyn LiveUpdateCallback>>>>,
     active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
-    tokio_runtime: Arc<tokio::runtime::Runtime>, 
+    tokio_runtime: Arc<tokio::runtime::Runtime>,
 }
 
 #[uniffi::export]
@@ -56,6 +57,7 @@ impl ContextRuntimeHandle {
         Arc::new(Self {
             config,
             documents: RwLock::new(HashMap::new()),
+            // FIX 2 (continued): Initialize with the new type
             live_callback: Arc::new(RwLock::new(None)),
             active_jobs: Arc::new(Mutex::new(HashMap::new())),
             tokio_runtime,
@@ -70,14 +72,14 @@ impl ContextRuntimeHandle {
 
     pub fn open(&self, uri: String, content: String) -> bool {
         let runtime = ContextRuntime::new(self.config.clone().into());
-        
+
         match runtime.open_document(uri.clone(), content.clone()) {
             Ok(_) => {
                 let highlights: Vec<HighlightFfi> = runtime.get_highlights(&uri)
                     .into_iter()
                     .map(Into::into)
                     .collect();
-                
+
                 let diagnostics: Vec<DiagnosticFfi> = runtime.get_diagnostics(&uri)
                     .into_iter()
                     .map(Into::into)
@@ -107,12 +109,12 @@ impl ContextRuntimeHandle {
 
     pub fn update(&self, uri: String, start: u32, end: u32, new_text: String) -> bool {
         let mut updated_content = None;
-        
+
         if let Ok(docs) = self.documents.read() {
             if let Some(doc) = docs.get(&uri) {
                 let mut content = doc.content.clone();
                 let range = (start as usize)..(end as usize);
-                
+
                 // Ensure range is valid
                 if range.end <= content.len() && range.start <= range.end {
                     content.replace_range(range, &new_text);
@@ -123,14 +125,14 @@ impl ContextRuntimeHandle {
 
         if let Some(content) = updated_content {
             let runtime = ContextRuntime::new(self.config.clone().into());
-            
+
             match runtime.open_document(uri.clone(), content.clone()) {
                 Ok(_) => {
                     let highlights: Vec<HighlightFfi> = runtime.get_highlights(&uri)
                         .into_iter()
                         .map(Into::into)
                         .collect();
-                    
+
                     let diagnostics: Vec<DiagnosticFfi> = runtime.get_diagnostics(&uri)
                         .into_iter()
                         .map(Into::into)
@@ -154,6 +156,7 @@ impl ContextRuntimeHandle {
                 }
             }
         } else {
+            // FIX 3: Correct constructor for RuntimeErrorFfi::DocumentNotFound
             self.notify_error(RuntimeErrorFfi::DocumentNotFound { uri });
             false
         }
@@ -188,11 +191,12 @@ impl ContextRuntimeHandle {
     pub fn compile(&self, uri: String) -> String {
         // Create job_id first and clone it for the async block
         let job_id = format!("compile_{}", uuid::Uuid::new_v4());
-        let job_id_for_async = job_id.clone();  // Clone for the async block
-        
+        let job_id_for_async = job_id.clone();
+
         let content = match self.get_document_source(uri.clone()) {
             Some(content) => content,
             None => {
+                // FIX 3: Correct constructor for RuntimeErrorFfi::DocumentNotFound
                 self.notify_error(RuntimeErrorFfi::DocumentNotFound { uri });
                 return job_id;
             }
@@ -210,6 +214,7 @@ impl ContextRuntimeHandle {
 
         // Clone all necessary Arc references
         let active_jobs = Arc::clone(&self.active_jobs);
+        // FIX 2 (continued): Clone the correct type of live_callback
         let live_callback = Arc::clone(&self.live_callback);
         let config = self.config.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -246,12 +251,13 @@ impl ContextRuntimeHandle {
             if let Ok(mut jobs) = active_jobs.lock() {
                 jobs.remove(&job_id_for_async);
             }
-            
+
             if let Ok(cb) = live_callback.read() {
                 if let Some(callback) = &*cb {
                     callback.on_compilation_completed(job.uri.clone(), ffi_result);
                 }
             }
+
         });
 
         // Return the original job_id
@@ -280,7 +286,13 @@ impl ContextRuntimeHandle {
 
     pub fn compile_async(&self, uri: String) -> Option<Arc<AsyncCompilationFuture>> {
         let content = self.get_document_source(uri.clone())?;
-        let future = AsyncCompilationFuture::new(self.tokio_runtime.clone(), self.config.clone(), uri, content);
+        let future = AsyncCompilationFuture::new(
+            self.tokio_runtime.clone(),
+            self.config.clone(),
+            uri,
+            content,
+            Arc::clone(&self.live_callback), // This now passes the Box version
+        );
         Some(Arc::new(future))
     }
 
@@ -339,7 +351,7 @@ async fn perform_remote_compilation(
 
     let response = request.send().await.map_err(|e| format!("Failed to send request: {}", e))?;
     let status = response.status();
-    
+
     if !status.is_success() {
         let error_details = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         return Err(format!("Server error: {} - {}", status, error_details));
@@ -347,13 +359,29 @@ async fn perform_remote_compilation(
 
     let mut result = response.json::<CompileResultFfi>().await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
+    if let Some(pdf_path) = result.pdf_path.take() {
+        // Handle empty server URL case
+        let server_url = config.server_url.as_deref().unwrap_or("").trim_end_matches('/');
+        let pdf_path = pdf_path.trim_start_matches('/');
 
+        // Create new String for the final URL
+        let full_url = if server_url.is_empty() {
+            pdf_path.to_string()
+        } else {
+            format!("{}/{}", server_url, pdf_path)
+        };
+
+        println!("Final PDF URL: {}", full_url);
+        result.pdf_path = Some(full_url);
+    }
     // Ensure all diagnostics have valid ranges
     result.diagnostics = result.diagnostics.into_iter().map(|d| {
         DiagnosticFfi {
-            start: d.start.or(Some(0)),
-            end: d.end.or(Some(0)),
-            ..d
+            // FIX 1: Use `start`, `end`, and `severity`
+            start: d.start.or(Some(0)), // Use .or(Some(0)) as they are Option<u32>
+            end: d.end.or(Some(0)),     // Use .or(Some(0)) as they are Option<u32>
+            severity: d.severity,
+            message: d.message,
         }
     }).collect();
 
@@ -363,7 +391,7 @@ async fn perform_remote_compilation(
 async fn perform_local_compilation(job: &CompilationJob) -> Result<CompileResultFfi, String> {
     println!("Performing local compilation");
     let runtime = ContextRuntime::new(job.config.clone().into());
-    
+
     runtime.open_document(job.uri.clone(), job.content.clone())
         .map_err(|e| format!("Failed to open document: {}", e))?;
 
@@ -383,17 +411,30 @@ pub struct AsyncCompilationFuture {
     result: Arc<Mutex<Option<CompileResultFfi>>>,
     ready: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    // Change this to Box as well
+    live_callback: Arc<RwLock<Option<Box<dyn LiveUpdateCallback>>>>,
 }
 
 impl AsyncCompilationFuture {
-    fn new(tokio_runtime: Arc<tokio::runtime::Runtime>, config: RuntimeConfigFfi, uri: String, content: String) -> Self {
+    fn new(
+        tokio_runtime: Arc<tokio::runtime::Runtime>,
+        config: RuntimeConfigFfi,
+        uri: String,
+        content: String,
+        // Change parameter type
+        live_callback: Arc<RwLock<Option<Box<dyn LiveUpdateCallback>>>>,
+    ) -> Self {
         let result = Arc::new(Mutex::new(None));
         let ready = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
-        
+
         let result_clone = Arc::clone(&result);
         let ready_clone = Arc::clone(&ready);
         let cancelled_clone = Arc::clone(&cancelled);
+        // FIX 2 (continued): Clone for the async move block
+        let live_callback_clone = Arc::clone(&live_callback);
+
+        let uri_for_callback = uri.clone(); // Keep original URI for callback
 
         tokio_runtime.spawn(async move {
             if cancelled_clone.load(Ordering::Relaxed) {
@@ -404,10 +445,12 @@ impl AsyncCompilationFuture {
 
             let ffi_result = if config.remote {
                 println!("Performing remote async compilation");
+                // It's generally better to call the shared `perform_remote_compilation` here
+                // but adapting the existing duplicated logic as per your request for minimal changes
                 let server_url = config.server_url.clone().unwrap_or_default();
                 let auth_token = config.auth_token.clone();
                 let request_body = CompileRequestFfi {
-                    uri: uri.clone(),        
+                    uri: uri.clone(),
                     content: content.clone(),
                     format: Some("pdf".to_string()),
                 };
@@ -430,10 +473,29 @@ impl AsyncCompilationFuture {
                     Ok(response) => {
                         let status = response.status();
                         println!("Async compilation response status: {}", status);
-                        
+
                         if status.is_success() {
                             match response.json::<CompileResultFfi>().await {
-                                Ok(result) => {
+                                Ok(mut result) => { // Make result mutable to potentially modify pdf_path
+                                    if let Some(pdf_path) = result.pdf_path.take() {
+                                        let server_url = config.server_url.as_deref().unwrap_or("").trim_end_matches('/');
+                                        let pdf_path_trimmed = pdf_path.trim_start_matches('/');
+                                        let full_url = if server_url.is_empty() {
+                                            pdf_path_trimmed.to_string()
+                                        } else {
+                                            format!("{}/{}", server_url, pdf_path_trimmed)
+                                        };
+                                        result.pdf_path = Some(full_url);
+                                    }
+                                    result.diagnostics = result.diagnostics.into_iter().map(|d| {
+                                        DiagnosticFfi {
+                                            // FIX 1: Use `start`, `end`, and `severity`
+                                            start: d.start.or(Some(0)),
+                                            end: d.end.or(Some(0)),
+                                            severity: d.severity,
+                                            message: d.message,
+                                        }
+                                    }).collect();
                                     println!("Successfully parsed async compilation result: success={}", result.success);
                                     result
                                 },
@@ -460,7 +522,8 @@ impl AsyncCompilationFuture {
                 println!("Performing local async compilation");
                 let compilation_result = tokio::task::spawn_blocking(move || {
                     if cancelled_clone.load(Ordering::Relaxed) {
-                        return Err("Compilation cancelled".to_string());
+                        // FIX: Return a proper CompileResultFfi for cancellation, perhaps with a specific message
+                        return Ok(CompileResultFfi::error("Compilation cancelled".to_string()));
                     }
 
                     let runtime = ContextRuntime::new(config.into());
@@ -470,13 +533,14 @@ impl AsyncCompilationFuture {
                                 .expect("Failed to create tokio runtime for local async compilation");
                             rt_inner.block_on(runtime.compile_document(&uri))
                         })
-                        .map_err(|e| format!("{}", e))
+                        .map(|res| res.into()) // Convert CompilationResult to CompileResultFfi
+                        .map_err(|e| format!("{}", e)) // Convert RuntimeErrors to String
                 }).await;
 
                 match compilation_result {
                     Ok(Ok(compile_result)) => {
                         println!("Local async compilation successful");
-                        compile_result.into()
+                        compile_result
                     },
                     Ok(Err(error_msg)) => {
                         let error_msg = format!("Local async compilation failed: {}", error_msg);
@@ -510,16 +574,24 @@ impl AsyncCompilationFuture {
                     }
                 }
             };
-            
+
             println!("Async compilation completed: success={}", ffi_result.success);
-            
+
             if let Ok(mut result_guard) = result_clone.lock() {
-                *result_guard = Some(ffi_result);
+                *result_guard = Some(ffi_result.clone()); // Clone for storage
             }
+
+            // Notify the live callback
+            if let Ok(cb) = live_callback_clone.read() {
+                if let Some(callback) = &*cb {
+                    callback.on_compilation_completed(uri_for_callback, ffi_result); // Use uri_for_callback
+                }
+            }
+
             ready_clone.store(true, Ordering::Relaxed);
         });
 
-        Self { result, ready, cancelled }
+        Self { result, ready, cancelled, live_callback } // Initialize live_callback
     }
 }
 
