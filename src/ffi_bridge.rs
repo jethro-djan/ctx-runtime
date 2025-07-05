@@ -59,6 +59,20 @@ pub struct RuntimeConfigFfi {
     pub local_executable: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
+pub struct CompileRequestFfi {
+    pub file_name: String,
+    pub content: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
+pub struct CompileResponseFfi {
+    pub success: bool,
+    pub pdf_path: Option<String>,
+    pub log: String,
+    pub diagnostics: Vec<DiagnosticFfi>,
+}
+
 // ============================================================================
 // Conversions: From Rust Types to FFI Types
 // ============================================================================

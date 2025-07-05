@@ -257,7 +257,7 @@ impl CompilationBackend for RemoteBackend {
                 if d.severity == "error" {
                     Some(CompilationError {
                         line: d.range.as_ref().map_or(0, |r| r.start),
-                        column: 0,
+                        column: d.range.as_ref().map_or(0, |r| r.end),
                         message: d.message.clone(),
                     })
                 } else {
@@ -268,7 +268,7 @@ impl CompilationBackend for RemoteBackend {
                 if d.severity == "warning" {
                     Some(CompilationError {
                         line: d.range.as_ref().map_or(0, |r| r.start),
-                        column: 0,
+                        column: d.range.as_ref().map_or(0, |r| r.end),
                         message: d.message.clone(),
                     })
                 } else {
