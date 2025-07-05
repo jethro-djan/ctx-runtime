@@ -244,16 +244,20 @@ impl ContextRuntimeHandle {
                         println!("Received response with status: {}", status);
                         
                         if status.is_success() {
-                            match response.json::<CompileResultFfi>() {
-                                Ok(result) => {
-                                    println!("Successfully parsed compilation result: success={}", result.success);
+                            match response.json::<CompileResultFfi>().await {
+                                Ok(mut result) => {
+                                    // Ensure all diagnostics have valid ranges
+                                    result.diagnostics = result.diagnostics
+                                        .into_iter()
+                                        .map(|d| d.with_default_range())
+                                        .collect();
                                     result
                                 },
                                 Err(e) => {
-                                    let error_msg = format!("Failed to parse remote compilation response: {}", e);
+                                    let error_msg = format!("Failed to parse remote async compilation response: {}", e);
                                     println!("{}", error_msg);
                                     CompileResultFfi::error(error_msg)
-                                },
+                                }
                             }
                         } else {
                             // Try to get error details from response body

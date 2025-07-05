@@ -43,8 +43,10 @@ pub enum RuntimeErrorFfi {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
 pub struct DiagnosticFfi {
-    pub start: u32,
-    pub end: u32,
+    #[serde(default)]
+    pub start: Option<u32>,
+    #[serde(default)]
+    pub end: Option<u32>,
     pub severity: String,
     pub message: String,
 }
@@ -69,14 +71,6 @@ pub struct CompileRequestFfi {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
-pub struct CompileResponseFfi {
-    pub success: bool,
-    pub pdf_path: Option<String>,
-    pub log: String,
-    pub diagnostics: Vec<DiagnosticFfi>,
 }
 
 // ============================================================================
@@ -138,11 +132,22 @@ impl From<Highlight> for HighlightFfi {
 
 impl From<Diagnostic> for DiagnosticFfi {
     fn from(d: Diagnostic) -> Self {
-        DiagnosticFfi {
-            start: d.range.start as u32,
-            end: d.range.end as u32,
-            severity: d.severity.to_string(),
-            message: d.message,
+        DiagnosticFfi::new(
+            Some(d.range.start as u32),
+            Some(d.range.end as u32),
+            d.severity.to_string(),
+            d.message,
+        )
+    }
+}
+
+impl DiagnosticFfi {
+    pub fn without_range(severity: String, message: String) -> Self {
+        Self {
+            start: None,
+            end: None,
+            severity,
+            message,
         }
     }
 }
@@ -151,21 +156,21 @@ impl From<CompilationResult> for CompileResultFfi {
     fn from(result: CompilationResult) -> Self {
         let mut diagnostics = Vec::new();
 
-        // Add errors as diagnostics
+        // Convert errors
         for error in result.errors {
             diagnostics.push(DiagnosticFfi {
-                start: error.line as u32,
-                end: (error.line + 1) as u32, // Assuming end is line + 1 for now, adjust if you have actual column range
+                start: Some(error.line as u32),
+                end: Some((error.line + 1) as u32),
                 severity: "error".to_string(),
                 message: error.message,
             });
         }
 
-        // Add warnings as diagnostics
+        // Convert warnings
         for warning in result.warnings {
             diagnostics.push(DiagnosticFfi {
-                start: warning.line as u32,
-                end: (warning.line + 1) as u32, // Assuming end is line + 1 for now, adjust if you have actual column range
+                start: Some(warning.line as u32),
+                end: Some((warning.line + 1) as u32),
                 severity: "warning".to_string(),
                 message: warning.message,
             });
@@ -233,6 +238,17 @@ impl Default for RuntimeConfigFfi {
             server_url: None,
             auth_token: None,
             local_executable: None,
+        }
+    }
+}
+
+impl DiagnosticFfi {
+    pub fn new(start: Option<u32>, end: Option<u32>, severity: String, message: String) -> Self {
+        Self {
+            start,
+            end,
+            severity,
+            message,
         }
     }
 }
