@@ -29,6 +29,7 @@ pub enum SyntaxKind {
 pub type SyntaxNode = RowanSyntaxNode<ConTeXtLanguage>;
 pub type SyntaxToken = RowanSyntaxToken<ConTeXtLanguage>;
 
+#[derive(Debug)]
 pub struct SyntaxTree {
     arena: Bump,        
     green: GreenNode, 

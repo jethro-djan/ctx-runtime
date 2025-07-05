@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use regex::Regex;
 use serde::Deserialize;
 use reqwest::Client;
+use which::which;
 
 #[derive(Debug)]
 pub struct CompilationRequest {
@@ -73,22 +74,30 @@ pub trait CompilationBackend: Send + Sync + std::fmt::Debug + Any {
 
 #[derive(Debug)]
 pub struct LocalBackend {
-    executable_path: PathBuf,
+    mtxrun_path: PathBuf,
     working_dir: TempDir,
 }
 
 impl LocalBackend {
-    pub fn new(executable_path: Option<PathBuf>) -> Result<Self, BackendError> {
-        let executable_path = executable_path.unwrap_or_else(|| PathBuf::from("context"));
+    pub fn new(mtxrun_path_config: Option<PathBuf>) -> Result<Self, BackendError> {
+        let actual_mtxrun_path: PathBuf = if let Some(path) = mtxrun_path_config {
+            if !path.exists() {
+                return Err(BackendError::Unavailable(
+                    format!("Configured mtxrun executable not found at {:?}", path)
+                ));
+            }
+            path
+        } else {
+            which("mtxrun").map_err(|e| BackendError::Unavailable(
+                format!("mtxrun executable not found in system PATH. Error: {}", e)
+            ))?
+        };
 
         let working_dir = tempfile::tempdir()
             .map_err(|e| BackendError::Setup(e.to_string()))?;
 
-        if !executable_path.exists() {
-            return Err(BackendError::Unavailable("ConTeXt not found in PATH".into()));
-        }
-        Ok(Self { 
-            executable_path,
+        Ok(Self {
+            mtxrun_path: actual_mtxrun_path,
             working_dir,
         })
     }
@@ -184,24 +193,28 @@ impl CompilationBackend for LocalBackend {
     }
 
     async fn compile(&self, request: CompilationRequest) -> Result<CompilationResult, BackendError> {
-         use tokio::process::Command;
-        
+        use tokio::process::Command;
+
         let temp_file = self.create_temp_file(&request.job_id, &request.content).await?;
-        
-        let output = Command::new(&self.executable_path)
+        let temp_file_name = temp_file.file_name()
+                                    .and_then(|s| s.to_str())
+                                    .ok_or_else(|| BackendError::IO("Failed to get temp file name".into()))?;
+
+        let output = Command::new(&self.mtxrun_path) 
+            .arg("--script")                          
+            .arg("context")                          
             .arg("--batchmode")
-            .arg("--nonstopmode") 
+            .arg("--nonstopmode")
             .arg("--purgeall")
-            .arg(&temp_file)
+            .arg(temp_file_name)
             .current_dir(&self.working_dir)
             .output()
             .await
-            .map_err(|e| BackendError::Compilation(e.to_string()))?;
-            
+            .map_err(|e| BackendError::Compilation(format!("Failed to execute mtxrun: {}", e)))?;
+
         self.process_output(output, &temp_file).await
     }
 }
-
 #[derive(Debug)]
 pub struct RemoteBackend {
     endpoint: String,

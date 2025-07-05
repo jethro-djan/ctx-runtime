@@ -35,6 +35,9 @@ pub enum RuntimeErrorFfi {
     DocumentNotFound { uri: String },
     LockPoisoned,
     CompilationError { details: String },
+    // === ADD THIS VARIANT ===
+    Unavailable { details: String },
+    // ========================
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
@@ -61,8 +64,10 @@ pub struct RuntimeConfigFfi {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
 pub struct CompileRequestFfi {
-    pub file_name: String,
+    pub uri: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, uniffi::Record)]
@@ -100,16 +105,19 @@ impl From<RuntimeError> for RuntimeErrorFfi {
         match err {
             RuntimeError::DocumentNotFound(uri) => Self::DocumentNotFound { uri },
             RuntimeError::LockPoisoned => Self::LockPoisoned,
-            RuntimeError::CompilationError { message, .. } => Self::CompilationError { 
-                details: message 
+            RuntimeError::CompilationError { message, .. } => Self::CompilationError {
+                details: message
             },
+            // === ADD THIS MATCH ARM ===
+            RuntimeError::Unavailable(details) => Self::Unavailable { details },
+            // ==========================
         }
     }
 }
 
 impl From<std::io::Error> for RuntimeErrorFfi {
     fn from(err: std::io::Error) -> Self {
-        Self::CompilationError { 
+        Self::CompilationError {
             details: format!("IO Error: {}", err)
         }
     }
@@ -141,12 +149,12 @@ impl From<Diagnostic> for DiagnosticFfi {
 impl From<CompilationResult> for CompileResultFfi {
     fn from(result: CompilationResult) -> Self {
         let mut diagnostics = Vec::new();
-        
+
         // Add errors as diagnostics
         for error in result.errors {
             diagnostics.push(DiagnosticFfi {
                 start: error.line as u32,
-                end: (error.line + 1) as u32,
+                end: (error.line + 1) as u32, // Assuming end is line + 1 for now, adjust if you have actual column range
                 severity: "error".to_string(),
                 message: error.message,
             });
@@ -156,7 +164,7 @@ impl From<CompilationResult> for CompileResultFfi {
         for warning in result.warnings {
             diagnostics.push(DiagnosticFfi {
                 start: warning.line as u32,
-                end: (warning.line + 1) as u32,
+                end: (warning.line + 1) as u32, // Assuming end is line + 1 for now, adjust if you have actual column range
                 severity: "warning".to_string(),
                 message: warning.message,
             });
@@ -180,7 +188,7 @@ impl From<Result<CompilationResult, RuntimeError>> for CompileResultFfi {
                 pdf_path: None,
                 log: format!("Compilation failed: {:?}", error),
                 diagnostics: vec![DiagnosticFfi {
-                    start: 0, 
+                    start: 0,
                     end: 0,
                     severity: "error".to_string(),
                     message: format!("{:?}", error),
@@ -239,7 +247,7 @@ impl CompileResultFfi {
             pdf_path: None,
             log: message.clone(),
             diagnostics: vec![DiagnosticFfi {
-                start: 0, 
+                start: 0,
                 end: 0,
                 severity: "error".to_string(),
                 message,

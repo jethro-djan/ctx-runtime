@@ -3,16 +3,14 @@ use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::runtime::ContextRuntime;
-use crate::ffi_bridge::*; // Assuming these are defined elsewhere, e.g., in ffi_bridge.rs
+use crate::ffi_bridge::*;
 
 use uniffi::{self};
 
-// Document state that we can safely store (without the problematic Bump allocator)
 #[derive(Debug, Clone)]
 struct DocumentState {
     uri: String,
     content: String,
-    // Store processed results instead of the raw syntax tree
     highlights: Vec<HighlightFfi>,
     diagnostics: Vec<DiagnosticFfi>,
 }
@@ -40,7 +38,7 @@ pub struct ContextRuntimeHandle {
     documents: RwLock<HashMap<String, DocumentState>>,
     live_callback: Arc<RwLock<Option<Box<dyn LiveUpdateCallback>>>>,
     active_jobs: Arc<Mutex<HashMap<String, CompilationJob>>>,
-    tokio_runtime: Arc<tokio::runtime::Runtime>, // Central Tokio runtime
+    tokio_runtime: Arc<tokio::runtime::Runtime>, 
 }
 
 #[uniffi::export]
@@ -52,7 +50,6 @@ impl ContextRuntimeHandle {
 
     #[uniffi::constructor]
     pub fn new_with_config(config: RuntimeConfigFfi) -> Arc<Self> {
-        // Create or get tokio runtime
         let tokio_runtime = Arc::new(tokio::runtime::Runtime::new()
             .expect("Failed to create tokio runtime"));
 
@@ -72,13 +69,10 @@ impl ContextRuntimeHandle {
     }
 
     pub fn open(&self, uri: String, content: String) -> bool {
-        // Create a temporary runtime to process the document
-        // Consider if ContextRuntime should be persistent or managed differently
         let runtime = ContextRuntime::new(self.config.clone().into());
         
         match runtime.open_document(uri.clone(), content.clone()) {
             Ok(_) => {
-                // Extract the processed data we need
                 let highlights: Vec<HighlightFfi> = runtime.get_highlights(&uri)
                     .into_iter()
                     .map(Into::into)
@@ -89,7 +83,6 @@ impl ContextRuntimeHandle {
                     .map(Into::into)
                     .collect();
 
-                // Store only the safe data
                 let doc_state = DocumentState {
                     uri: uri.clone(),
                     content,
@@ -101,7 +94,6 @@ impl ContextRuntimeHandle {
                     docs.insert(uri.clone(), doc_state);
                 }
 
-                // Notify callback
                 self.notify_highlights_updated(&uri, highlights);
                 self.notify_diagnostics_updated(&uri, diagnostics);
                 true
@@ -116,7 +108,6 @@ impl ContextRuntimeHandle {
     pub fn update(&self, uri: String, start: u32, end: u32, new_text: String) -> bool {
         let mut updated_content = None;
         
-        // Get current content and update it
         if let Ok(docs) = self.documents.read() {
             if let Some(doc) = docs.get(&uri) {
                 let mut content = doc.content.clone();
@@ -131,13 +122,10 @@ impl ContextRuntimeHandle {
         }
 
         if let Some(content) = updated_content {
-            // Create temporary runtime to reprocess the document
-            // Consider if ContextRuntime should be persistent or managed differently
             let runtime = ContextRuntime::new(self.config.clone().into());
             
             match runtime.open_document(uri.clone(), content.clone()) {
                 Ok(_) => {
-                    // Get updated highlights and diagnostics
                     let highlights: Vec<HighlightFfi> = runtime.get_highlights(&uri)
                         .into_iter()
                         .map(Into::into)
@@ -148,7 +136,6 @@ impl ContextRuntimeHandle {
                         .map(Into::into)
                         .collect();
 
-                    // Update stored state
                     if let Ok(mut docs) = self.documents.write() {
                         if let Some(doc) = docs.get_mut(&uri) {
                             doc.content = content;
@@ -157,7 +144,6 @@ impl ContextRuntimeHandle {
                         }
                     }
 
-                    // Notify callback
                     self.notify_highlights_updated(&uri, highlights);
                     self.notify_diagnostics_updated(&uri, diagnostics);
                     true
@@ -202,7 +188,6 @@ impl ContextRuntimeHandle {
     pub fn compile(&self, uri: String) -> String {
         let job_id = format!("compile_{}", uuid::Uuid::new_v4());
         
-        // Get document content
         let content = match self.get_document_source(uri.clone()) {
             Some(content) => content,
             None => {
@@ -213,11 +198,10 @@ impl ContextRuntimeHandle {
 
         let job = CompilationJob {
             uri: uri.clone(),
-            content,
+            content: content.clone(),
             config: self.config.clone(),
         };
 
-        // Store job
         if let Ok(mut jobs) = self.active_jobs.lock() {
             jobs.insert(job_id.clone(), job.clone());
         }
@@ -225,72 +209,100 @@ impl ContextRuntimeHandle {
         let job_id_clone = job_id.clone();
         let active_jobs = Arc::clone(&self.active_jobs);
         let live_callback_clone = Arc::clone(&self.live_callback);
-        let config_clone = self.config.clone(); // Clone config for use in the async block
+        let config_clone = self.config.clone();
 
-        // Spawn a blocking task for the compilation
         self.tokio_runtime.spawn_blocking(move || {
+            println!("Starting compilation job {} for URI: {}", job_id_clone, job.uri);
+            
             let ffi_result = if config_clone.remote {
-                // Remote compilation
+                println!("Performing remote compilation");
                 let server_url = config_clone.server_url.clone().unwrap_or_default();
                 let auth_token = config_clone.auth_token.clone();
                 let request_body = CompileRequestFfi {
-                    file_name: job.uri.clone(),
-                    content: job.content.clone(),
+                    uri: uri.clone(),        
+                    content: content.clone(),
+                    format: Some("pdf".to_string()),
                 };
+
+                println!("Sending request to: {}/compile", server_url);
+                println!("Request body: uri={}, content_length={}", request_body.uri, request_body.content.len());
 
                 let client = reqwest::blocking::Client::new();
                 let mut request = client.post(&format!("{}/compile", server_url))
-                    .json(&request_body);
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .timeout(std::time::Duration::from_secs(30));
 
                 if let Some(token) = auth_token {
                     request = request.bearer_auth(token);
+                    println!("Using authentication token");
                 }
 
                 match request.send() {
                     Ok(response) => {
-                        if response.status().is_success() {
+                        let status = response.status();
+                        println!("Received response with status: {}", status);
+                        
+                        if status.is_success() {
                             match response.json::<CompileResultFfi>() {
-                                Ok(result) => result,
-                                Err(e) => CompileResultFfi::error(format!("Failed to parse remote compilation response: {}", e)),
+                                Ok(result) => {
+                                    println!("Successfully parsed compilation result: success={}", result.success);
+                                    result
+                                },
+                                Err(e) => {
+                                    let error_msg = format!("Failed to parse remote compilation response: {}", e);
+                                    println!("{}", error_msg);
+                                    CompileResultFfi::error(error_msg)
+                                },
                             }
                         } else {
-                            CompileResultFfi::error(format!("Remote compilation failed with status: {}", response.status()))
+                            // Try to get error details from response body
+                            let error_details = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+                            let error_msg = format!("Remote compilation failed with status: {} - {}", status, error_details);
+                            println!("{}", error_msg);
+                            CompileResultFfi::error(error_msg)
                         }
                     },
-                    Err(e) => CompileResultFfi::error(format!("Failed to send remote compilation request: {}", e)),
+                    Err(e) => {
+                        let error_msg = format!("Failed to send remote compilation request: {}", e);
+                        println!("{}", error_msg);
+                        CompileResultFfi::error(error_msg)
+                    },
                 }
             } else {
-                // Local compilation (blocking, as ContextRuntime may not be Send/Sync)
-                // Create ContextRuntime within this blocking task
+                println!("Performing local compilation");
                 let runtime = ContextRuntime::new(job.config.into());
                 let compilation_result = runtime.open_document(job.uri.clone(), job.content)
                     .and_then(|_| {
-                        // For the `compile_document` which is async, we need to block on it
-                        // within this blocking task, using a temporary mini-runtime or
-                        // ensuring the ContextRuntime itself handles its async ops internally.
-                        // Given you have `self.tokio_runtime` already, we should ideally
-                        // run this on that main runtime, but since `ContextRuntime` is not Send,
-                        // this is the common pattern.
                         let rt_inner = tokio::runtime::Runtime::new()
                             .expect("Failed to create tokio runtime for local compilation");
                         rt_inner.block_on(runtime.compile_document(&job.uri))
                     });
 
                 match compilation_result {
-                    Ok(res) => res.into(),
-                    Err(e) => CompileResultFfi {
-                        success: false,
-                        pdf_path: None,
-                        log: format!("{}", e),
-                        diagnostics: vec![DiagnosticFfi {
-                            start: 0,
-                            end: 0,
-                            severity: "error".to_string(),
-                            message: format!("{}", e),
-                        }],
+                    Ok(res) => {
+                        println!("Local compilation successful");
+                        res.into()
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Local compilation failed: {}", e);
+                        println!("{}", error_msg);
+                        CompileResultFfi {
+                            success: false,
+                            pdf_path: None,
+                            log: error_msg.clone(),
+                            diagnostics: vec![DiagnosticFfi {
+                                start: 0,
+                                end: 0,
+                                severity: "error".to_string(),
+                                message: error_msg,
+                            }],
+                        }
                     }
                 }
             };
+
+            println!("Compilation completed for job {}: success={}", job_id_clone, ffi_result.success);
 
             // Clean up job
             if let Ok(mut jobs) = active_jobs.lock() {
@@ -301,6 +313,8 @@ impl ContextRuntimeHandle {
             if let Ok(cb) = live_callback_clone.read() {
                 if let Some(callback) = &*cb {
                     callback.on_compilation_completed(job.uri, ffi_result);
+                } else {
+                    println!("No live callback registered");
                 }
             }
         });
@@ -326,6 +340,12 @@ impl ContextRuntimeHandle {
         self.documents.read()
             .map(|docs| docs.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    pub fn compile_async(&self, uri: String) -> Option<Arc<AsyncCompilationFuture>> {
+        let content = self.get_document_source(uri.clone())?;
+        let future = AsyncCompilationFuture::new(self.tokio_runtime.clone(), self.config.clone(), uri, content);
+        Some(Arc::new(future))
     }
 
     // Helper methods for notifications
@@ -354,7 +374,7 @@ impl ContextRuntimeHandle {
     }
 }
 
-// Simplified async compilation that doesn't store problematic state
+// Async compilation future
 #[derive(uniffi::Object)]
 pub struct AsyncCompilationFuture {
     result: Arc<Mutex<Option<CompileResultFfi>>>,
@@ -363,7 +383,6 @@ pub struct AsyncCompilationFuture {
 }
 
 impl AsyncCompilationFuture {
-    // Modified signature to accept tokio_runtime
     fn new(tokio_runtime: Arc<tokio::runtime::Runtime>, config: RuntimeConfigFfi, uri: String, content: String) -> Self {
         let result = Arc::new(Mutex::new(None));
         let ready = Arc::new(AtomicBool::new(false));
@@ -373,68 +392,92 @@ impl AsyncCompilationFuture {
         let ready_clone = Arc::clone(&ready);
         let cancelled_clone = Arc::clone(&cancelled);
 
-        // Use the passed tokio_runtime for spawning
         tokio_runtime.spawn(async move {
             if cancelled_clone.load(Ordering::Relaxed) {
                 return;
             }
 
+            println!("Starting async compilation for URI: {}", uri);
+
             let ffi_result = if config.remote {
-                // Remote compilation: can be fully async
+                println!("Performing remote async compilation");
                 let server_url = config.server_url.clone().unwrap_or_default();
                 let auth_token = config.auth_token.clone();
                 let request_body = CompileRequestFfi {
-                    file_name: uri.clone(),
+                    uri: uri.clone(),        
                     content: content.clone(),
+                    format: Some("pdf".to_string()),
                 };
+
+                println!("Sending async request to: {}/compile", server_url);
+                println!("Request body: uri={}, content_length={}", request_body.uri, request_body.content.len());
 
                 let client = reqwest::Client::new();
                 let mut request = client.post(&format!("{}/compile", server_url))
-                    .json(&request_body);
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .timeout(std::time::Duration::from_secs(30));
 
                 if let Some(token) = auth_token {
                     request = request.bearer_auth(token);
+                    println!("Using authentication token for async request");
                 }
 
                 match request.send().await {
                     Ok(response) => {
-                        if response.status().is_success() {
+                        let status = response.status();
+                        println!("Async compilation response status: {}", status);
+                        
+                        if status.is_success() {
                             match response.json::<CompileResultFfi>().await {
-                                Ok(result) => result,
-                                Err(e) => CompileResultFfi::error(format!("Failed to parse remote compilation response: {}", e)),
+                                Ok(result) => {
+                                    println!("Successfully parsed async compilation result: success={}", result.success);
+                                    result
+                                },
+                                Err(e) => {
+                                    let error_msg = format!("Failed to parse remote async compilation response: {}", e);
+                                    println!("{}", error_msg);
+                                    CompileResultFfi::error(error_msg)
+                                },
                             }
                         } else {
-                            CompileResultFfi::error(format!("Remote compilation failed with status: {}", response.status()))
+                            let error_details = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                            let error_msg = format!("Remote async compilation failed with status: {} - {}", status, error_details);
+                            println!("{}", error_msg);
+                            CompileResultFfi::error(error_msg)
                         }
                     },
-                    Err(e) => CompileResultFfi::error(format!("Failed to send remote compilation request: {}", e)),
+                    Err(e) => {
+                        let error_msg = format!("Failed to send remote async compilation request: {}", e);
+                        println!("{}", error_msg);
+                        CompileResultFfi::error(error_msg)
+                    },
                 }
             } else {
-                // Local compilation: needs to be spawned into a blocking task if ContextRuntime
-                // is not Send and its methods are not pure async, or if they do heavy blocking I/O.
+                println!("Performing local async compilation");
                 let compilation_result = tokio::task::spawn_blocking(move || {
                     if cancelled_clone.load(Ordering::Relaxed) {
-                        return Err("Compilation cancelled".to_string()); // Return a string error
+                        return Err("Compilation cancelled".to_string());
                     }
 
-                    // Create ContextRuntime in the blocking task
                     let runtime = ContextRuntime::new(config.into());
-                    
-                    // Open document, then compile. Both might return Result.
                     runtime.open_document(uri.clone(), content)
                         .and_then(|_| {
-                            // Since compile_document is async, block on it within this blocking task.
-                            // A new mini-runtime here is okay as it's isolated to this blocking task.
                             let rt_inner = tokio::runtime::Runtime::new()
-                                .expect("Failed to create tokio runtime for local compilation in blocking task");
+                                .expect("Failed to create tokio runtime for local async compilation");
                             rt_inner.block_on(runtime.compile_document(&uri))
                         })
-                        .map_err(|e| format!("{}", e)) // Convert any error to string
-                }).await; // Await the join handle from spawn_blocking
+                        .map_err(|e| format!("{}", e))
+                }).await;
 
                 match compilation_result {
-                    Ok(Ok(compile_result)) => compile_result.into(), // Outer Ok for spawn_blocking, inner Ok for actual result
-                    Ok(Err(error_msg)) => { // Outer Ok for spawn_blocking, inner Err for compilation error
+                    Ok(Ok(compile_result)) => {
+                        println!("Local async compilation successful");
+                        compile_result.into()
+                    },
+                    Ok(Err(error_msg)) => {
+                        let error_msg = format!("Local async compilation failed: {}", error_msg);
+                        println!("{}", error_msg);
                         CompileResultFfi {
                             success: false,
                             pdf_path: None,
@@ -446,9 +489,10 @@ impl AsyncCompilationFuture {
                                 message: error_msg,
                             }],
                         }
-                    }
-                    Err(join_err) => { // Err from spawn_blocking (e.g., task panicked)
-                        let error_msg = format!("Compilation task failed: {}", join_err);
+                    },
+                    Err(join_err) => {
+                        let error_msg = format!("Async compilation task failed: {}", join_err);
+                        println!("{}", error_msg);
                         CompileResultFfi {
                             success: false,
                             pdf_path: None,
@@ -463,6 +507,8 @@ impl AsyncCompilationFuture {
                     }
                 }
             };
+            
+            println!("Async compilation completed: success={}", ffi_result.success);
             
             if let Ok(mut result_guard) = result_clone.lock() {
                 *result_guard = Some(ffi_result);
@@ -491,15 +537,5 @@ impl AsyncCompilationFuture {
     pub fn cancel(&self) -> bool {
         self.cancelled.store(true, Ordering::Relaxed);
         true
-    }
-}
-
-#[uniffi::export]
-impl ContextRuntimeHandle {
-    pub fn compile_async(&self, uri: String) -> Option<Arc<AsyncCompilationFuture>> {
-        let content = self.get_document_source(uri.clone())?;
-        // Pass self.tokio_runtime to AsyncCompilationFuture::new
-        let future = AsyncCompilationFuture::new(self.tokio_runtime.clone(), self.config.clone(), uri, content);
-        Some(Arc::new(future))
     }
 }
