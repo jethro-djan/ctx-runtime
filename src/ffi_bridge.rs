@@ -25,6 +25,7 @@ pub struct TextRangeFfi {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, uniffi::Record)]
 pub struct CompileResultFfi {
     pub success: bool,
+    #[serde(rename = "output_url")]
     pub pdf_path: Option<String>,
     pub log: String,
     pub diagnostics: Vec<DiagnosticFfi>,
